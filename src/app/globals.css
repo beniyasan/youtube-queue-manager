@@ -1,0 +1,198 @@
+@import "tailwindcss";
+
+:root {
+  /* Dark arcade theme */
+  --bg-primary: #0d0d0d;
+  --bg-secondary: #1a1a2e;
+  --bg-card: #16213e;
+  --bg-card-hover: #1f2b4d;
+  
+  /* Neon accents */
+  --neon-cyan: #00fff5;
+  --neon-magenta: #ff00ff;
+  --neon-yellow: #ffff00;
+  --neon-green: #00ff88;
+  --neon-orange: #ff6b35;
+  
+  /* Text */
+  --text-primary: #ffffff;
+  --text-secondary: #a0a0a0;
+  --text-muted: #666666;
+  
+  /* Borders */
+  --border-color: #2a2a4a;
+  --border-glow: rgba(0, 255, 245, 0.3);
+  
+  /* Shadows */
+  --glow-cyan: 0 0 20px rgba(0, 255, 245, 0.5), 0 0 40px rgba(0, 255, 245, 0.2);
+  --glow-magenta: 0 0 20px rgba(255, 0, 255, 0.5), 0 0 40px rgba(255, 0, 255, 0.2);
+  --glow-green: 0 0 20px rgba(0, 255, 136, 0.5), 0 0 40px rgba(0, 255, 136, 0.2);
+}
+
+@theme inline {
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-pixel);
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-body), "Noto Sans JP", sans-serif;
+  min-height: 100vh;
+}
+
+/* CRT Scanline effect overlay */
+.crt-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.15),
+    rgba(0, 0, 0, 0.15) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  z-index: 9999;
+}
+
+/* Pixel font for headings */
+.font-pixel {
+  font-family: var(--font-pixel), "Press Start 2P", monospace;
+}
+
+/* Neon text glow */
+.neon-text-cyan {
+  color: var(--neon-cyan);
+  text-shadow: var(--glow-cyan);
+}
+
+.neon-text-magenta {
+  color: var(--neon-magenta);
+  text-shadow: var(--glow-magenta);
+}
+
+.neon-text-green {
+  color: var(--neon-green);
+  text-shadow: var(--glow-green);
+}
+
+/* Neon border glow */
+.neon-border {
+  border: 2px solid var(--neon-cyan);
+  box-shadow: var(--glow-cyan), inset 0 0 20px rgba(0, 255, 245, 0.1);
+}
+
+.neon-border-magenta {
+  border: 2px solid var(--neon-magenta);
+  box-shadow: var(--glow-magenta), inset 0 0 20px rgba(255, 0, 255, 0.1);
+}
+
+/* Arcade button style */
+.arcade-btn {
+  background: linear-gradient(180deg, var(--neon-cyan) 0%, #00b8b0 100%);
+  color: var(--bg-primary);
+  font-family: var(--font-pixel), monospace;
+  font-size: 0.7rem;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  box-shadow: 
+    0 4px 0 #008080,
+    0 6px 20px rgba(0, 255, 245, 0.4);
+  transition: all 0.1s ease;
+}
+
+.arcade-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 
+    0 6px 0 #008080,
+    0 8px 30px rgba(0, 255, 245, 0.6);
+}
+
+.arcade-btn:active {
+  transform: translateY(2px);
+  box-shadow: 
+    0 2px 0 #008080,
+    0 4px 10px rgba(0, 255, 245, 0.3);
+}
+
+.arcade-btn-secondary {
+  background: linear-gradient(180deg, var(--neon-magenta) 0%, #cc00cc 100%);
+  box-shadow: 
+    0 4px 0 #800080,
+    0 6px 20px rgba(255, 0, 255, 0.4);
+}
+
+.arcade-btn-secondary:hover {
+  box-shadow: 
+    0 6px 0 #800080,
+    0 8px 30px rgba(255, 0, 255, 0.6);
+}
+
+/* Card style */
+.arcade-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.arcade-card:hover {
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 30px rgba(0, 255, 245, 0.2);
+}
+
+/* Input style */
+.arcade-input {
+  background: var(--bg-secondary);
+  border: 2px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  padding: 0.75rem 1rem;
+  width: 100%;
+  transition: all 0.2s ease;
+}
+
+.arcade-input:focus {
+  outline: none;
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 15px rgba(0, 255, 245, 0.3);
+}
+
+.arcade-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Pulse animation */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Flicker animation for neon effect */
+@keyframes flicker {
+  0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+    opacity: 1;
+  }
+  20%, 24%, 55% {
+    opacity: 0.8;
+  }
+}
+
+.animate-flicker {
+  animation: flicker 3s linear infinite;
+}
