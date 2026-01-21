@@ -186,6 +186,13 @@ export default function RoomPage() {
         return
       }
 
+      // Optimistic UI update
+      if (data.destination === 'participant' && data.entry) {
+        setParticipants(prev => [...prev, data.entry])
+      } else if (data.destination === 'queue' && data.entry) {
+        setQueue(prev => [...prev, data.entry])
+      }
+
       if (data.destination === 'participant') {
         setAddMessage({ type: 'success', text: data.message || '参加者に追加しました' })
       } else {
@@ -193,7 +200,7 @@ export default function RoomPage() {
       }
 
       setNewEntry('')
-      fetchRoomData()
+      // No sync - fully optimistic (only revert on error)
     } catch (err) {
       console.error('Failed to add entry:', err)
       setAddMessage({ type: 'error', text: '通信エラーで追加できませんでした' })
@@ -204,30 +211,54 @@ export default function RoomPage() {
   }
 
   const handleRemoveParticipant = async (participantId: string) => {
+    // Optimistic UI update
+    setParticipants(prev => prev.filter(p => p.id !== participantId))
+
     try {
       const res = await fetch(`/api/rooms/${id}/participants/${participantId}`, {
         method: 'DELETE',
       })
 
-      if (res.ok) {
+      if (!res.ok) {
+        // Revert on failure
         fetchRoomData()
       }
+      // No sync on success - fully optimistic
     } catch (err) {
       console.error('Failed to remove participant:', err)
+      // Revert on error
+      fetchRoomData()
     }
   }
 
   const handleRemoveFromQueue = async (queueId: string) => {
+    // Optimistic UI update
+    const removedPosition = queue.find(q => q.id === queueId)?.position
+    setQueue(prev => {
+      const filtered = prev.filter(q => q.id !== queueId)
+      // Re-number positions
+      if (removedPosition !== undefined) {
+        return filtered.map(q =>
+          q.position > removedPosition ? { ...q, position: q.position - 1 } : q
+        )
+      }
+      return filtered
+    })
+
     try {
       const res = await fetch(`/api/rooms/${id}/queue/${queueId}`, {
         method: 'DELETE',
       })
 
-      if (res.ok) {
+      if (!res.ok) {
+        // Revert on failure
         fetchRoomData()
       }
+      // No sync on success - fully optimistic
     } catch (err) {
       console.error('Failed to remove from queue:', err)
+      // Revert on error
+      fetchRoomData()
     }
   }
 
@@ -240,6 +271,35 @@ export default function RoomPage() {
       return
     }
 
+    // Optimistic UI update for rotate
+    const rotateCount = Math.min(room?.rotate_count || 1, queue.length)
+    const participantsToRotate = participants.slice(0, rotateCount)
+    const queueToMove = queue.slice(0, rotateCount)
+
+    setParticipants(prev => {
+      const remaining = prev.slice(rotateCount)
+      const newEntries = queueToMove.map(q => ({
+        id: `temp-${Date.now()}-${Math.random()}`,
+        youtube_username: q.youtube_username,
+        display_name: q.display_name,
+        joined_at: new Date().toISOString(),
+        source: q.source,
+      }))
+      return [...remaining, ...newEntries]
+    })
+
+    setQueue(prev => {
+      const remaining = prev.slice(rotateCount)
+      const rotatedMembers = participantsToRotate.map((p, index) => ({
+        id: `temp-queue-${Date.now()}-${Math.random()}`,
+        youtube_username: p.youtube_username,
+        display_name: p.display_name,
+        position: remaining.length + index + 1,
+        source: p.source,
+      }))
+      return [...remaining, ...rotatedMembers]
+    })
+
     setRotating(true)
     try {
       const res = await fetch(`/api/rooms/${id}/rotate`, {
@@ -250,15 +310,18 @@ export default function RoomPage() {
 
       if (!res.ok) {
         setRotateMessage({ type: 'error', text: data.error || '交代に失敗しました' })
+        // Revert on failure
+        fetchRoomData()
         return
       }
 
       setRotateMessage({ type: 'success', text: data.message || '交代しました' })
-
-      fetchRoomData()
+      // No sync - fully optimistic (only revert on error)
     } catch (err) {
       console.error('Failed to rotate:', err)
       setRotateMessage({ type: 'error', text: '通信エラーで交代できませんでした' })
+      // Revert on error
+      fetchRoomData()
     } finally {
       setRotating(false)
       setTimeout(() => setRotateMessage(null), 2500)
@@ -430,7 +493,7 @@ export default function RoomPage() {
               </span>
             </div>
 
-            <div className="space-y-2 mb-4 max-h-64 overflow-y-auto">
+            <div className="space-y-2 mb-4">
               {participants.length === 0 ? (
                 <p className="text-[var(--text-muted)] text-sm text-center py-4">
                   参加者がいません
@@ -475,7 +538,7 @@ export default function RoomPage() {
               </span>
             </div>
 
-            <div className="space-y-2 mb-4 max-h-64 overflow-y-auto">
+            <div className="space-y-2 mb-4">
               {queue.length === 0 ? (
                 <p className="text-[var(--text-muted)] text-sm text-center py-4">
                   待機者がいません
@@ -537,7 +600,9 @@ export default function RoomPage() {
           >
             {rotating
               ? 'ROTATING...'
-              : `🔄 交代する（${room.rotate_count}人入れ替え）`}
+              : queue.length === 0
+                ? '交代メンバーがいません'
+                : `🔄 交代する（${Math.min(room.rotate_count, queue.length)}人入れ替え）`}
           </button>
         </div>
       </main>

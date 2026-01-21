@@ -74,6 +74,112 @@ export async function PUT(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
+    // Handle party_size changes
+    const { count: participantCount } = await supabase
+      .from('participants')
+      .select('*', { count: 'exact', head: true })
+      .eq('room_id', id)
+
+    const currentParticipantCount = participantCount || 0
+
+    // Case 1: party_size reduction - move excess participants to queue
+    if (currentParticipantCount > party_size) {
+      const excessCount = currentParticipantCount - party_size
+
+      // Get excess participants (oldest by joined_at)
+      const { data: excessParticipants } = await supabase
+        .from('participants')
+        .select('*')
+        .eq('room_id', id)
+        .order('joined_at', { ascending: true })
+        .limit(excessCount)
+
+      if (excessParticipants && excessParticipants.length > 0) {
+        // Shift existing queue positions up by excessCount
+        const { data: allQueue } = await supabase
+          .from('waiting_queue')
+          .select('id, position')
+          .eq('room_id', id)
+          .order('position', { ascending: true })
+
+        if (allQueue) {
+          for (const q of allQueue) {
+            await supabase
+              .from('waiting_queue')
+              .update({ position: q.position + excessCount })
+              .eq('id', q.id)
+          }
+        }
+
+        // Insert excess participants at the front of queue
+        for (let i = 0; i < excessParticipants.length; i++) {
+          const p = excessParticipants[i]
+          await supabase.from('waiting_queue').insert({
+            room_id: id,
+            youtube_username: p.youtube_username,
+            display_name: p.display_name,
+            position: i + 1,
+            source: p.source,
+          })
+        }
+
+        // Remove excess participants
+        const excessIds = excessParticipants.map(p => p.id)
+        await supabase
+          .from('participants')
+          .delete()
+          .in('id', excessIds)
+      }
+    }
+
+    // Case 2: party_size increase - promote waiting queue to participants
+    if (currentParticipantCount < party_size) {
+      const availableSlots = party_size - currentParticipantCount
+
+      // Get top waiting queue members by position
+      const { data: queueToPromote } = await supabase
+        .from('waiting_queue')
+        .select('*')
+        .eq('room_id', id)
+        .order('position', { ascending: true })
+        .limit(availableSlots)
+
+      if (queueToPromote && queueToPromote.length > 0) {
+        // Add to participants
+        for (const q of queueToPromote) {
+          await supabase.from('participants').insert({
+            room_id: id,
+            youtube_username: q.youtube_username,
+            display_name: q.display_name,
+            source: q.source,
+          })
+        }
+
+        // Remove from queue
+        const promoteIds = queueToPromote.map(q => q.id)
+        await supabase
+          .from('waiting_queue')
+          .delete()
+          .in('id', promoteIds)
+
+        // Reorder remaining queue positions
+        const { data: remainingQueue } = await supabase
+          .from('waiting_queue')
+          .select('id, position')
+          .eq('room_id', id)
+          .order('position', { ascending: true })
+
+        if (remainingQueue) {
+          for (let i = 0; i < remainingQueue.length; i++) {
+            await supabase
+              .from('waiting_queue')
+              .update({ position: i + 1 })
+              .eq('id', remainingQueue[i].id)
+          }
+        }
+      }
+    }
+
     return NextResponse.json({ room })
   } catch {
     return NextResponse.json({ error: 'サーバーエラーが発生しました' }, { status: 500 })

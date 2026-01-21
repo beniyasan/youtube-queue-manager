@@ -46,11 +46,8 @@ export async function POST(
 
     const rotateCount = Math.min(room.rotate_count, queue.length)
     
-    // Remove oldest participants
+    // Get oldest participants to rotate out
     const participantsToRemove = participants?.slice(0, rotateCount) || []
-    for (const p of participantsToRemove) {
-      await supabase.from('participants').delete().eq('id', p.id)
-    }
 
     // Add from queue to participants
     const queueToMove = queue.slice(0, rotateCount)
@@ -64,20 +61,27 @@ export async function POST(
       await supabase.from('waiting_queue').delete().eq('id', q.id)
     }
 
-    // Reorder remaining queue
-    const { data: remainingQueue } = await supabase
+    // Get current max position in queue after promotions
+    const { data: currentQueue } = await supabase
       .from('waiting_queue')
-      .select('id, position')
+      .select('position')
       .eq('room_id', id)
-      .order('position', { ascending: true })
+      .order('position', { ascending: false })
+      .limit(1)
 
-    if (remainingQueue) {
-      for (let i = 0; i < remainingQueue.length; i++) {
-        await supabase
-          .from('waiting_queue')
-          .update({ position: i + 1 })
-          .eq('id', remainingQueue[i].id)
-      }
+    const maxPosition = currentQueue?.[0]?.position || 0
+
+    // Move rotated participants to end of queue
+    for (let i = 0; i < participantsToRemove.length; i++) {
+      const p = participantsToRemove[i]
+      await supabase.from('waiting_queue').insert({
+        room_id: id,
+        youtube_username: p.youtube_username,
+        display_name: p.display_name,
+        position: maxPosition + i + 1,
+        source: p.source,
+      })
+      await supabase.from('participants').delete().eq('id', p.id)
     }
 
     return NextResponse.json({ 
