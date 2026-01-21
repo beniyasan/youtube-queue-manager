@@ -26,11 +26,12 @@ export async function POST(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
-    // Get current participants (oldest first)
+    // Get current participants (position order)
     const { data: participants } = await supabase
       .from('participants')
       .select('*')
       .eq('room_id', id)
+      .order('position', { ascending: true })
       .order('joined_at', { ascending: true })
 
     // Get waiting queue (by position)
@@ -69,7 +70,8 @@ export async function POST(
       .order('position', { ascending: false })
       .limit(1)
 
-    const maxPosition = currentQueue?.[0]?.position || 0
+    const maxPosition = currentQueue?.[0]?.position ?? -1
+    const startPosition = maxPosition + 1
 
     // Move rotated participants to end of queue
     for (let i = 0; i < participantsToRemove.length; i++) {
@@ -78,10 +80,20 @@ export async function POST(
         room_id: id,
         youtube_username: p.youtube_username,
         display_name: p.display_name,
-        position: maxPosition + i + 1,
+        position: startPosition + i,
         source: p.source,
       })
       await supabase.from('participants').delete().eq('id', p.id)
+    }
+
+    if (rotateCount > 0) {
+      const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+        p_room_id: id,
+      })
+
+      if (bumpError) {
+        return NextResponse.json({ error: bumpError.message }, { status: 500 })
+      }
     }
 
     return NextResponse.json({ 

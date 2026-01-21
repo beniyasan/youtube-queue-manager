@@ -207,7 +207,7 @@ export async function GET(
       .limit(1)
       .single()
 
-    let nextPosition = lastInQueue ? lastInQueue.position + 1 : 1
+    let nextPosition = lastInQueue ? lastInQueue.position + 1 : 0
 
     for (const msg of newMessages) {
       if (existingUsernames.has(msg.authorDisplayName)) {
@@ -262,6 +262,16 @@ export async function GET(
       })
       .eq('id', id)
       .eq('user_id', user.id)
+
+    if (added.length > 0) {
+      const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+        p_room_id: id,
+      })
+
+      if (bumpError) {
+        return NextResponse.json({ error: bumpError.message }, { status: 500 })
+      }
+    }
 
     return NextResponse.json({
       message: 'ポーリング完了',

@@ -83,7 +83,7 @@ export async function POST(
       .limit(1)
       .single()
 
-    const nextPosition = lastInQueue ? lastInQueue.position + 1 : 1
+    const nextPosition = lastInQueue ? lastInQueue.position + 1 : 0
 
     const { data: queueMember, error } = await supabase
       .from('waiting_queue')
@@ -102,6 +102,14 @@ export async function POST(
         return NextResponse.json({ error: 'このユーザーは既に登録されています' }, { status: 400 })
       }
       return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+      p_room_id: id,
+    })
+
+    if (bumpError) {
+      return NextResponse.json({ error: bumpError.message }, { status: 500 })
     }
 
     return NextResponse.json({ queueMember }, { status: 201 })

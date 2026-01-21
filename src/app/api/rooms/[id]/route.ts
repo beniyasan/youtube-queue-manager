@@ -74,6 +74,8 @@ export async function PUT(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
+    let orderOrMembershipChanged = false
+
     // Handle party_size changes
     const { count: participantCount } = await supabase
       .from('participants')
@@ -95,6 +97,7 @@ export async function PUT(
         .limit(excessCount)
 
       if (excessParticipants && excessParticipants.length > 0) {
+        orderOrMembershipChanged = true
         // Shift existing queue positions up by excessCount
         const { data: allQueue } = await supabase
           .from('waiting_queue')
@@ -118,7 +121,7 @@ export async function PUT(
             room_id: id,
             youtube_username: p.youtube_username,
             display_name: p.display_name,
-            position: i + 1,
+            position: i,
             source: p.source,
           })
         }
@@ -145,6 +148,7 @@ export async function PUT(
         .limit(availableSlots)
 
       if (queueToPromote && queueToPromote.length > 0) {
+        orderOrMembershipChanged = true
         // Add to participants
         for (const q of queueToPromote) {
           await supabase.from('participants').insert({
@@ -173,10 +177,20 @@ export async function PUT(
           for (let i = 0; i < remainingQueue.length; i++) {
             await supabase
               .from('waiting_queue')
-              .update({ position: i + 1 })
+              .update({ position: i })
               .eq('id', remainingQueue[i].id)
           }
         }
+      }
+    }
+
+    if (orderOrMembershipChanged) {
+      const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+        p_room_id: id,
+      })
+
+      if (bumpError) {
+        return NextResponse.json({ error: bumpError.message }, { status: 500 })
       }
     }
 

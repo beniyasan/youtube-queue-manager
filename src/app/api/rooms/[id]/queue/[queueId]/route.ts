@@ -38,14 +38,19 @@ export async function DELETE(
     }
 
     // Delete the item
-    const { error: deleteError } = await supabase
+    const { data: deletedItems, error: deleteError } = await supabase
       .from('waiting_queue')
       .delete()
       .eq('id', queueId)
       .eq('room_id', id)
+      .select('id')
 
     if (deleteError) {
       return NextResponse.json({ error: deleteError.message }, { status: 500 })
+    }
+
+    if (!deletedItems || deletedItems.length == 0) {
+      return NextResponse.json({ error: '待機者が見つかりません' }, { status: 404 })
     }
 
     // Reorder positions
@@ -58,11 +63,23 @@ export async function DELETE(
 
     if (remainingQueue && remainingQueue.length > 0) {
       for (const item of remainingQueue) {
-        await supabase
+        const { error: updateError } = await supabase
           .from('waiting_queue')
           .update({ position: item.position - 1 })
           .eq('id', item.id)
+
+        if (updateError) {
+          return NextResponse.json({ error: updateError.message }, { status: 500 })
+        }
       }
+    }
+
+    const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+      p_room_id: id,
+    })
+
+    if (bumpError) {
+      return NextResponse.json({ error: bumpError.message }, { status: 500 })
     }
 
     return NextResponse.json({ message: '待機者を削除しました' })

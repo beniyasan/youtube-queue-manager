@@ -113,6 +113,14 @@ export async function POST(
         return NextResponse.json({ error: insertError.message }, { status: 500 })
       }
 
+      const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+        p_room_id: id,
+      })
+
+      if (bumpError) {
+        return NextResponse.json({ error: bumpError.message }, { status: 500 })
+      }
+
       return NextResponse.json(
         {
           status: 'created',
@@ -135,7 +143,8 @@ export async function POST(
       return NextResponse.json({ error: lastInQueueError.message }, { status: 500 })
     }
 
-    const nextPosition = (lastInQueue?.[0]?.position ?? 0) + 1
+    const lastQueuePosition = lastInQueue?.[0]?.position
+    const nextPosition = (typeof lastQueuePosition === 'number' ? lastQueuePosition : -1) + 1
 
     const { data: queueMember, error: queueInsertError } = await supabase
       .from('waiting_queue')
@@ -158,6 +167,14 @@ export async function POST(
         })
       }
       return NextResponse.json({ error: queueInsertError.message }, { status: 500 })
+    }
+
+    const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+      p_room_id: id,
+    })
+
+    if (bumpError) {
+      return NextResponse.json({ error: bumpError.message }, { status: 500 })
     }
 
     return NextResponse.json(

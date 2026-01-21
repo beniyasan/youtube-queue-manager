@@ -52,6 +52,7 @@ export async function GET(
       .from("participants")
       .select("id,youtube_username,display_name,joined_at,source")
       .eq("room_id", token)
+      .order("position", { ascending: true })
       .order("joined_at", { ascending: true });
 
     if (participantsError) {

@@ -30,6 +30,7 @@ export async function GET(
       .from('participants')
       .select('*')
       .eq('room_id', id)
+      .order('position', { ascending: true })
       .order('joined_at', { ascending: true })
 
     if (error) {
@@ -100,6 +101,14 @@ export async function POST(
         return NextResponse.json({ error: 'このユーザーは既に参加しています' }, { status: 400 })
       }
       return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+      p_room_id: id,
+    })
+
+    if (bumpError) {
+      return NextResponse.json({ error: bumpError.message }, { status: 500 })
     }
 
     return NextResponse.json({ participant }, { status: 201 })

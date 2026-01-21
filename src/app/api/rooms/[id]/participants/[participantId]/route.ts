@@ -26,14 +26,25 @@ export async function DELETE(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
-    const { error } = await supabase
+    const { data: deletedParticipants, error } = await supabase
       .from('participants')
       .delete()
       .eq('id', participantId)
       .eq('room_id', id)
+      .select('id')
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    if (deletedParticipants && deletedParticipants.length > 0) {
+      const { error: bumpError } = await supabase.rpc('bump_room_order_version', {
+        p_room_id: id,
+      })
+
+      if (bumpError) {
+        return NextResponse.json({ error: bumpError.message }, { status: 500 })
+      }
     }
 
     return NextResponse.json({ message: '参加者を削除しました' })

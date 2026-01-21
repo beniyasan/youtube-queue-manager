@@ -3,7 +3,23 @@
 import { useAuth } from '@/hooks/useAuth'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  pointerWithin,
+  rectIntersection,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 interface Room {
   id: string
@@ -14,6 +30,7 @@ interface Room {
   party_size: number
   rotate_count: number
   is_monitoring: boolean
+  order_version: number
 }
 
 interface Participant {
@@ -44,10 +61,206 @@ type PollResponse = {
   error?: string
 }
 
+type DndList = 'party' | 'queue'
+
+type DndEdge = 'before' | 'after' | 'empty'
+
+type DndMode = 'insert' | 'swap'
+
+type DndOp = {
+  source: {
+    list: DndList
+    id: string
+  }
+  dest: {
+    list: DndList
+    overId: string | null
+    edge: DndEdge
+  }
+  mode: DndMode
+}
+
+type DropIndicator = {
+  list: DndList
+  overId: string | null
+  edge: DndEdge
+} | null
+
+const PARTY_CONTAINER_ID = 'party'
+const QUEUE_CONTAINER_ID = 'queue'
+
+type ClientPoint = { x: number; y: number }
+
+function getClientPoint(event: Event | null): ClientPoint | null {
+  if (!event) return null
+
+  if ('touches' in event) {
+    const touchEvent = event as TouchEvent
+    const firstTouch = touchEvent.touches?.[0]
+    if (firstTouch) {
+      return { x: firstTouch.clientX, y: firstTouch.clientY }
+    }
+  }
+
+  if ('clientX' in event && 'clientY' in event) {
+    const mouseEvent = event as MouseEvent
+    return { x: mouseEvent.clientX, y: mouseEvent.clientY }
+  }
+
+  return null
+}
+
+function normalizeQueuePositions(queue: QueueMember[]): QueueMember[] {
+  return queue.map((q, index) => ({ ...q, position: index }))
+}
+
+function makeTempParticipant(clientOpId: string, source: QueueMember): Participant {
+  return {
+    id: `temp-party-${clientOpId}-${source.youtube_username}`,
+    youtube_username: source.youtube_username,
+    display_name: source.display_name,
+    joined_at: new Date().toISOString(),
+    source: source.source,
+  }
+}
+
+function makeTempQueueMember(
+  clientOpId: string,
+  source: Participant,
+  position: number
+): QueueMember {
+  return {
+    id: `temp-queue-${clientOpId}-${source.youtube_username}`,
+    youtube_username: source.youtube_username,
+    display_name: source.display_name,
+    position,
+    source: source.source,
+  }
+}
+
+function SortableArcadeRow(props: {
+  itemId: string
+  list: DndList
+  indexLabel: string
+  accentVar: 'cyan' | 'yellow'
+  name: string
+  showYoutubeBadge?: boolean
+  onRemove?: () => void
+  indicatorEdge?: Exclude<DndEdge, 'empty'> | null
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({
+      id: props.itemId,
+      data: { list: props.list },
+    })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+
+  const accentColor =
+    props.accentVar === 'cyan' ? 'var(--neon-cyan)' : 'var(--neon-yellow)'
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      className={
+        'relative flex items-center justify-between bg-[var(--bg-secondary)] p-3 rounded border border-transparent transition-colors ' +
+        (isDragging
+          ? 'opacity-60'
+          : 'hover:border-[var(--border-color)] hover:shadow-[0_0_0_1px_rgba(0,255,245,0.15)]')
+      }
+    >
+      {props.indicatorEdge === 'before' && (
+        <div className="absolute left-2 right-2 top-0 h-[2px] bg-[var(--neon-cyan)] opacity-90" />
+      )}
+      {props.indicatorEdge === 'after' && (
+        <div className="absolute left-2 right-2 bottom-0 h-[2px] bg-[var(--neon-cyan)] opacity-90" />
+      )}
+
+      <div className="flex items-center gap-3 min-w-0">
+        <button
+          type="button"
+          ref={setActivatorNodeRef}
+          {...listeners}
+          className="text-[var(--text-muted)] hover:text-[var(--neon-cyan)] cursor-grab active:cursor-grabbing select-none px-1"
+          aria-label="Drag"
+        >
+          ⋮⋮
+        </button>
+
+        <span className="font-mono text-sm" style={{ color: accentColor }}>
+          {props.indexLabel}
+        </span>
+
+        <span className="text-white truncate">{props.name}</span>
+
+        {props.showYoutubeBadge && (
+          <span className="text-xs bg-[var(--neon-magenta)]/20 text-[var(--neon-magenta)] px-1.5 py-0.5 rounded">
+            YT
+          </span>
+        )}
+      </div>
+
+      {props.onRemove && (
+        <button
+          type="button"
+          onClick={props.onRemove}
+          className="text-[var(--text-muted)] hover:text-red-400 transition-colors"
+          aria-label="Remove"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  )
+}
+
+function DragOverlayRow(props: {
+  indexLabel: string
+  accentVar: 'cyan' | 'yellow'
+  name: string
+  showYoutubeBadge?: boolean
+}) {
+  const accentColor =
+    props.accentVar === 'cyan' ? 'var(--neon-cyan)' : 'var(--neon-yellow)'
+
+  return (
+    <div className="flex items-center justify-between bg-[var(--bg-secondary)] p-3 rounded border border-[var(--border-color)] shadow-[0_0_20px_rgba(0,255,245,0.15)]">
+      <div className="flex items-center gap-3 min-w-0">
+        <span className="text-[var(--text-muted)] px-1 select-none">⋮⋮</span>
+        <span className="font-mono text-sm" style={{ color: accentColor }}>
+          {props.indexLabel}
+        </span>
+        <span className="text-white truncate">{props.name}</span>
+        {props.showYoutubeBadge && (
+          <span className="text-xs bg-[var(--neon-magenta)]/20 text-[var(--neon-magenta)] px-1.5 py-0.5 rounded">
+            YT
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+function DroppableArea(props: { id: string; className: string; children: React.ReactNode }) {
+  const { setNodeRef } = useDroppable({ id: props.id })
+
+  return (
+    <div ref={setNodeRef} className={props.className}>
+      {props.children}
+    </div>
+  )
+}
+
 export default function RoomPage() {
   const { id } = useParams()
   const { loading: authLoading } = useAuth()
-  
+
   const [room, setRoom] = useState<Room | null>(null)
   const [participants, setParticipants] = useState<Participant[]>([])
   const [queue, setQueue] = useState<QueueMember[]>([])
@@ -65,6 +278,13 @@ export default function RoomPage() {
     text: string
   } | null>(null)
   const [rotating, setRotating] = useState(false)
+
+  const [dndMessage, setDndMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(
+    null
+  )
+  const [dropIndicator, setDropIndicator] = useState<DropIndicator>(null)
+  const [activeDragId, setActiveDragId] = useState<string | null>(null)
+
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pollerIdRef = useRef<string | null>(null)
@@ -72,7 +292,32 @@ export default function RoomPage() {
   const recommendedMinRef = useRef<number>(0)
   const errorBackoffRef = useRef<number>(0)
 
+  const suppressExternalUpdatesRef = useRef(false)
+  const pendingExternalSyncRef = useRef(false)
+  const dragStartPointRef = useRef<ClientPoint | null>(null)
+  const dragDeltaRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+
+  const participantsRef = useRef(participants)
+  const queueRef = useRef(queue)
+  const roomRef = useRef(room)
+
+  useEffect(() => {
+    participantsRef.current = participants
+  }, [participants])
+
+  useEffect(() => {
+    queueRef.current = queue
+  }, [queue])
+
+  useEffect(() => {
+    roomRef.current = room
+  }, [room])
+
   const fetchRoomData = useCallback(async () => {
+    let nextRoom: Room | null = roomRef.current
+    let nextParticipants: Participant[] = participantsRef.current
+    let nextQueue: QueueMember[] = queueRef.current
+
     try {
       const [roomRes, participantsRes, queueRes] = await Promise.all([
         fetch(`/api/rooms/${id}`),
@@ -82,23 +327,29 @@ export default function RoomPage() {
 
       if (roomRes.ok) {
         const data = await roomRes.json()
-        setRoom(data.room)
+        nextRoom = data.room ?? null
+        setRoom(nextRoom)
       }
+
       if (participantsRes.ok) {
         const data = await participantsRes.json()
-        setParticipants(data.participants || [])
+        nextParticipants = data.participants || []
+        setParticipants(nextParticipants)
       }
+
       if (queueRes.ok) {
         const data = await queueRes.json()
-        setQueue(data.queue || [])
+        nextQueue = data.queue || []
+        setQueue(nextQueue)
       }
     } catch (err) {
       console.error('Failed to fetch room data:', err)
     } finally {
       setLoading(false)
     }
-  }, [id])
 
+    return { room: nextRoom, participants: nextParticipants, queue: nextQueue }
+  }, [id])
 
   const pollYoutube = useCallback(async () => {
     if (!isMonitoringRef.current) return
@@ -171,7 +422,13 @@ export default function RoomPage() {
 
       if (data.added && data.added.length > 0) {
         setLastAdded(data.added.map((a: { username: string }) => a.username))
-        fetchRoomData()
+
+        if (!suppressExternalUpdatesRef.current) {
+          fetchRoomData()
+        } else {
+          pendingExternalSyncRef.current = true
+        }
+
         setTimeout(() => setLastAdded([]), 3000)
       }
 
@@ -186,7 +443,13 @@ export default function RoomPage() {
 
       scheduleNext(retryAfterMs ?? ytInterval ?? 10000)
     } catch (err) {
-      if (err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError') return
+      if (
+        err &&
+        typeof err === 'object' &&
+        'name' in err &&
+        (err as { name?: string }).name === 'AbortError'
+      )
+        return
 
       const nextBackoff = errorBackoffRef.current
         ? Math.min(errorBackoffRef.current * 2, 60000)
@@ -198,13 +461,11 @@ export default function RoomPage() {
     }
   }, [id, fetchRoomData])
 
-
   useEffect(() => {
     if (!authLoading && id) {
       fetchRoomData()
     }
   }, [authLoading, id, fetchRoomData])
-
 
   useEffect(() => {
     isMonitoringRef.current = !!room?.is_monitoring
@@ -229,15 +490,14 @@ export default function RoomPage() {
     }
   }, [room?.is_monitoring, pollYoutube])
 
-
   const handleStartMonitoring = async () => {
     setMonitoringStatus('開始中...')
     try {
       const res = await fetch(`/api/rooms/${id}/youtube/start`, { method: 'POST' })
       const data = await res.json()
-      
+
       if (res.ok) {
-        setRoom(prev => prev ? { ...prev, is_monitoring: true } : null)
+        setRoom((prev) => (prev ? { ...prev, is_monitoring: true } : null))
         setMonitoringStatus('')
       } else {
         setMonitoringStatus(data.error)
@@ -253,7 +513,7 @@ export default function RoomPage() {
     try {
       const res = await fetch(`/api/rooms/${id}/youtube/stop`, { method: 'POST' })
       if (res.ok) {
-        setRoom(prev => prev ? { ...prev, is_monitoring: false } : null)
+        setRoom((prev) => (prev ? { ...prev, is_monitoring: false } : null))
       }
     } catch (err) {
       console.error('Failed to stop monitoring:', err)
@@ -291,9 +551,9 @@ export default function RoomPage() {
 
       // Optimistic UI update
       if (data.destination === 'participant' && data.entry) {
-        setParticipants(prev => [...prev, data.entry])
+        setParticipants((prev) => [...prev, data.entry])
       } else if (data.destination === 'queue' && data.entry) {
-        setQueue(prev => [...prev, data.entry])
+        setQueue((prev) => [...prev, data.entry])
       }
 
       if (data.destination === 'participant') {
@@ -315,7 +575,7 @@ export default function RoomPage() {
 
   const handleRemoveParticipant = async (participantId: string) => {
     // Optimistic UI update
-    setParticipants(prev => prev.filter(p => p.id !== participantId))
+    setParticipants((prev) => prev.filter((p) => p.id !== participantId))
 
     try {
       const res = await fetch(`/api/rooms/${id}/participants/${participantId}`, {
@@ -336,12 +596,12 @@ export default function RoomPage() {
 
   const handleRemoveFromQueue = async (queueId: string) => {
     // Optimistic UI update
-    const removedPosition = queue.find(q => q.id === queueId)?.position
-    setQueue(prev => {
-      const filtered = prev.filter(q => q.id !== queueId)
+    const removedPosition = queue.find((q) => q.id === queueId)?.position
+    setQueue((prev) => {
+      const filtered = prev.filter((q) => q.id !== queueId)
       // Re-number positions
       if (removedPosition !== undefined) {
-        return filtered.map(q =>
+        return filtered.map((q) =>
           q.position > removedPosition ? { ...q, position: q.position - 1 } : q
         )
       }
@@ -379,9 +639,9 @@ export default function RoomPage() {
     const participantsToRotate = participants.slice(0, rotateCount)
     const queueToMove = queue.slice(0, rotateCount)
 
-    setParticipants(prev => {
+    setParticipants((prev) => {
       const remaining = prev.slice(rotateCount)
-      const newEntries = queueToMove.map(q => ({
+      const newEntries = queueToMove.map((q) => ({
         id: `temp-${Date.now()}-${Math.random()}`,
         youtube_username: q.youtube_username,
         display_name: q.display_name,
@@ -391,16 +651,16 @@ export default function RoomPage() {
       return [...remaining, ...newEntries]
     })
 
-    setQueue(prev => {
-      const remaining = prev.slice(rotateCount)
+    setQueue((prev) => {
+      const remaining = normalizeQueuePositions(prev.slice(rotateCount))
       const rotatedMembers = participantsToRotate.map((p, index) => ({
         id: `temp-queue-${Date.now()}-${Math.random()}`,
         youtube_username: p.youtube_username,
         display_name: p.display_name,
-        position: remaining.length + index + 1,
+        position: remaining.length + index,
         source: p.source,
       }))
-      return [...remaining, ...rotatedMembers]
+      return normalizeQueuePositions([...remaining, ...rotatedMembers])
     })
 
     setRotating(true)
@@ -431,12 +691,423 @@ export default function RoomPage() {
     }
   }
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    })
+  )
+
+  const collisionDetection: CollisionDetection = useCallback((args) => {
+    const pointer = pointerWithin(args)
+    const itemCollisions = pointer.filter(
+      (c) => c.id !== PARTY_CONTAINER_ID && c.id !== QUEUE_CONTAINER_ID
+    )
+
+    if (itemCollisions.length > 0) return itemCollisions
+    if (pointer.length > 0) return pointer
+
+    return rectIntersection(args)
+  }, [])
+
+  const partyUsernames = useMemo(
+    () => participants.map((p) => p.youtube_username),
+    [participants]
+  )
+  const queueUsernames = useMemo(() => queue.map((q) => q.youtube_username), [queue])
+
+
+  const postDnd = useCallback(
+    async (expectedVersion: number, clientOpId: string, op: DndOp) => {
+      const res = await fetch(`/api/rooms/${id}/dnd`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expected_version: expectedVersion,
+          client_op_id: clientOpId,
+          op,
+        }),
+      })
+
+      const data = await res.json().catch(() => ({}))
+      return { res, data }
+    },
+    [id]
+  )
+
+  const applyServerState = useCallback(
+    (payload: { version?: number; participants?: Participant[]; queue?: QueueMember[] }) => {
+      if (typeof payload.version === 'number') {
+        const version = payload.version
+        setRoom((prev) => (prev ? { ...prev, order_version: version } : prev))
+      }
+
+      if (Array.isArray(payload.participants)) {
+        setParticipants(payload.participants)
+      }
+
+      if (Array.isArray(payload.queue)) {
+        setQueue(payload.queue)
+      }
+    },
+    []
+  )
+
+  const computePointer = useCallback(() => {
+    if (!dragStartPointRef.current) return null
+    return {
+      x: dragStartPointRef.current.x + dragDeltaRef.current.x,
+      y: dragStartPointRef.current.y + dragDeltaRef.current.y,
+    }
+  }, [])
+
+  const computeDropIndicator = useCallback(
+    (over: DragOverEvent['over']): DropIndicator => {
+      if (!over) return null
+
+      if (over.id === PARTY_CONTAINER_ID) {
+        return { list: 'party', overId: null, edge: 'empty' }
+      }
+
+      if (over.id === QUEUE_CONTAINER_ID) {
+        return { list: 'queue', overId: null, edge: 'empty' }
+      }
+
+      const overId = String(over.id)
+      const list = (over.data.current?.list as DndList | undefined) ??
+        (partyUsernames.includes(overId) ? 'party' : 'queue')
+
+      const pointer = computePointer()
+      const midY = over.rect.top + over.rect.height / 2
+      const edge: DndEdge = pointer && pointer.y < midY ? 'before' : 'after'
+
+      return { list, overId, edge }
+    },
+    [computePointer, partyUsernames]
+  )
+
+  const applyOptimisticOp = useCallback(
+    (clientOpId: string, op: DndOp) => {
+      const party = [...participantsRef.current]
+      const queueItems = [...queueRef.current]
+
+      const sourceId = op.source.id
+      const destOverId = op.dest.overId
+
+      if (op.mode === 'swap') {
+        if (op.source.list !== 'queue' || op.dest.list !== 'party' || !destOverId) return
+
+        const sourceQueueIndex = queueItems.findIndex((q) => q.youtube_username === sourceId)
+        const partyOverIndex = party.findIndex((p) => p.youtube_username === destOverId)
+        if (sourceQueueIndex === -1 || partyOverIndex === -1) {
+          return
+        }
+
+        const sourceQueueMember = queueItems[sourceQueueIndex]
+        const displacedParticipant = party[partyOverIndex]
+
+        party[partyOverIndex] = makeTempParticipant(clientOpId, sourceQueueMember)
+        queueItems[sourceQueueIndex] = makeTempQueueMember(
+          clientOpId,
+          displacedParticipant,
+          sourceQueueIndex
+        )
+
+        setParticipants(party)
+        setQueue(normalizeQueuePositions(queueItems))
+        return
+      }
+
+      // insert
+      let nextParty = party
+      let nextQueue = queueItems
+
+      if (op.source.list === 'party') {
+        nextParty = nextParty.filter((p) => p.youtube_username !== sourceId)
+      } else {
+        nextQueue = nextQueue.filter((q) => q.youtube_username !== sourceId)
+      }
+
+      const insertInto = op.dest.list
+
+      if (op.dest.overId === null) {
+        if (op.dest.edge !== 'empty') return
+
+        if (insertInto === 'party') {
+          const sourceQueueMember = queueItems.find((q) => q.youtube_username === sourceId)
+          const movedParticipant =
+            op.source.list === 'party'
+              ? party.find((p) => p.youtube_username === sourceId) ?? null
+              : sourceQueueMember
+                ? makeTempParticipant(clientOpId, sourceQueueMember)
+                : null
+
+          if (!movedParticipant) return
+
+          nextParty = [...nextParty, movedParticipant]
+          setParticipants(nextParty)
+          setQueue(normalizeQueuePositions(nextQueue))
+          return
+        }
+
+        if (insertInto === 'queue') {
+          const sourceParticipant = party.find((p) => p.youtube_username === sourceId)
+          const sourceQueueMember = queueItems.find((q) => q.youtube_username === sourceId)
+
+          const movedQueueMember =
+            op.source.list === 'queue'
+              ? sourceQueueMember
+              : sourceParticipant
+                ? makeTempQueueMember(clientOpId, sourceParticipant, nextQueue.length)
+                : null
+
+          if (!movedQueueMember) return
+
+          nextQueue = [...nextQueue, { ...movedQueueMember, position: nextQueue.length }]
+          setParticipants(nextParty)
+          setQueue(normalizeQueuePositions(nextQueue))
+          return
+        }
+
+        return
+      }
+
+      if (op.dest.edge === 'empty') return
+
+      const overId = op.dest.overId
+      if (!overId) return
+
+      if (insertInto === 'party') {
+        const overIndex = nextParty.findIndex((p) => p.youtube_username === overId)
+        if (overIndex === -1) return
+
+        const insertIndex = op.dest.edge === 'before' ? overIndex : overIndex + 1
+
+        const sourceQueueMember = queueItems.find((q) => q.youtube_username === sourceId)
+        const sourceParticipant = party.find((p) => p.youtube_username === sourceId)
+        const movedParticipant =
+          op.source.list === 'party'
+            ? sourceParticipant
+            : sourceQueueMember
+              ? makeTempParticipant(clientOpId, sourceQueueMember)
+              : null
+
+        if (!movedParticipant) return
+
+        nextParty = [...nextParty]
+        nextParty.splice(insertIndex, 0, movedParticipant)
+        setParticipants(nextParty)
+        setQueue(normalizeQueuePositions(nextQueue))
+        return
+      }
+
+      if (insertInto === 'queue') {
+        const overIndex = nextQueue.findIndex((q) => q.youtube_username === overId)
+        if (overIndex === -1) return
+
+        const insertIndex = op.dest.edge === 'before' ? overIndex : overIndex + 1
+
+        const sourceQueueMember = queueItems.find((q) => q.youtube_username === sourceId)
+        const sourceParticipant = party.find((p) => p.youtube_username === sourceId)
+        const movedQueueMember =
+          op.source.list === 'queue'
+            ? sourceQueueMember
+            : sourceParticipant
+              ? makeTempQueueMember(clientOpId, sourceParticipant, insertIndex)
+              : null
+
+        if (!movedQueueMember) return
+
+        nextQueue = [...nextQueue]
+        nextQueue.splice(insertIndex, 0, movedQueueMember)
+        setParticipants(nextParty)
+        setQueue(normalizeQueuePositions(nextQueue))
+        return
+      }
+    },
+    []
+  )
+
+  const clearDndSuppression = useCallback(async () => {
+    suppressExternalUpdatesRef.current = false
+    dragStartPointRef.current = null
+    dragDeltaRef.current = { x: 0, y: 0 }
+    setActiveDragId(null)
+    setDropIndicator(null)
+
+    if (pendingExternalSyncRef.current) {
+      pendingExternalSyncRef.current = false
+      await fetchRoomData()
+    }
+  }, [fetchRoomData])
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    suppressExternalUpdatesRef.current = true
+    setDndMessage(null)
+
+    const point = getClientPoint(event.activatorEvent as Event)
+    dragStartPointRef.current = point
+    dragDeltaRef.current = { x: 0, y: 0 }
+
+    setActiveDragId(String(event.active.id))
+  }, [])
+
+  const handleDragCancel = useCallback(() => {
+    void clearDndSuppression()
+  }, [clearDndSuppression])
+
+  const handleDragOver = useCallback(
+    (event: DragOverEvent) => {
+      dragDeltaRef.current = { x: event.delta.x, y: event.delta.y }
+      setDropIndicator(computeDropIndicator(event.over))
+    },
+    [computeDropIndicator]
+  )
+
+  const handleDragEnd = useCallback(
+    async (event: DragEndEvent) => {
+      dragDeltaRef.current = { x: event.delta.x, y: event.delta.y }
+
+      const sourceId = String(event.active.id)
+      const sourceList = (event.active.data.current?.list as DndList | undefined) ??
+        (participantsRef.current.some((p) => p.youtube_username === sourceId)
+          ? 'party'
+          : 'queue')
+
+      const indicator = computeDropIndicator(event.over)
+      setDropIndicator(indicator)
+
+      if (!indicator) {
+        await clearDndSuppression()
+        return
+      }
+
+      const partySize = roomRef.current?.party_size ?? 0
+      const partyCount = participantsRef.current.length
+
+      const crossList = sourceList !== indicator.list
+      const destIsPartyEmptyDrop =
+        crossList && indicator.list === 'party' && indicator.overId === null && indicator.edge === 'empty'
+
+      if (destIsPartyEmptyDrop && partyCount >= partySize) {
+        setDndMessage({ type: 'error', text: 'パーティーが満員です。別の場所にドロップしてください。' })
+        await clearDndSuppression()
+        return
+      }
+
+      let mode: DndMode = 'insert'
+
+      if (sourceList !== indicator.list) {
+        if (indicator.list === 'party' && indicator.overId !== null) {
+          if (sourceList === 'queue' && partyCount >= partySize) {
+            mode = 'swap'
+          }
+        }
+      }
+
+      const op: DndOp = {
+        source: { list: sourceList, id: sourceId },
+        dest: { list: indicator.list, overId: indicator.overId, edge: indicator.edge },
+        mode,
+      }
+
+      const clientOpId = crypto.randomUUID()
+      const expectedVersion = roomRef.current?.order_version ?? 0
+
+      // Optimistic update
+      applyOptimisticOp(clientOpId, op)
+
+      try {
+        const first = await postDnd(expectedVersion, clientOpId, op)
+
+        if (first.res.ok) {
+          applyServerState(first.data)
+          return
+        }
+
+        if (first.res.status === 409) {
+          const snapshot = await fetchRoomData()
+          const latestVersion = snapshot.room?.order_version ?? roomRef.current?.order_version ?? 0
+
+          if (op.dest.overId !== null) {
+            const existsInDest =
+              op.dest.list === 'party'
+                ? snapshot.participants.some((p) => p.youtube_username === op.dest.overId)
+                : snapshot.queue.some((q) => q.youtube_username === op.dest.overId)
+
+            if (!existsInDest) {
+              setDndMessage({
+                type: 'error',
+                text: '競合が発生しました。最新状態に同期したので、もう一度お試しください。',
+              })
+              return
+            }
+          }
+
+          const replay = await postDnd(latestVersion, clientOpId, op)
+
+          if (replay.res.ok) {
+            applyServerState(replay.data)
+            return
+          }
+
+          await fetchRoomData()
+          setDndMessage({
+            type: 'error',
+            text: '競合が解決できませんでした。もう一度お試しください。',
+          })
+          return
+        }
+
+        await fetchRoomData()
+        setDndMessage({ type: 'error', text: '並び替えに失敗しました。もう一度お試しください。' })
+      } catch {
+        await fetchRoomData()
+        setDndMessage({ type: 'error', text: '通信エラーで並び替えできませんでした。' })
+      } finally {
+        await clearDndSuppression()
+      }
+    },
+    [applyOptimisticOp, applyServerState, clearDndSuppression, computeDropIndicator, fetchRoomData, postDnd]
+  )
+
+  const activeOverlayData = useMemo(() => {
+    if (!activeDragId) return null
+
+    const inParty = participants.find((p) => p.youtube_username === activeDragId)
+    if (inParty) {
+      const index = participants.findIndex((p) => p.youtube_username === activeDragId)
+      return {
+        list: 'party' as const,
+        indexLabel: `${index + 1}.`,
+        accentVar: 'cyan' as const,
+        name: inParty.display_name || inParty.youtube_username,
+        showYoutubeBadge: inParty.source === 'youtube',
+      }
+    }
+
+    const inQueue = queue.find((q) => q.youtube_username === activeDragId)
+    if (inQueue) {
+      return {
+        list: 'queue' as const,
+        indexLabel: `${(inQueue.position ?? 0) + 1}.`,
+        accentVar: 'yellow' as const,
+        name: inQueue.display_name || inQueue.youtube_username,
+        showYoutubeBadge: inQueue.source === 'youtube',
+      }
+    }
+
+    return null
+  }, [activeDragId, participants, queue])
+
+  const isPartyEmptyDropTarget =
+    dropIndicator?.list === 'party' && dropIndicator.overId === null && dropIndicator.edge === 'empty'
+  const isQueueEmptyDropTarget =
+    dropIndicator?.list === 'queue' && dropIndicator.overId === null && dropIndicator.edge === 'empty'
+
   if (authLoading || loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="font-pixel text-[var(--neon-cyan)] animate-pulse-glow">
-          LOADING...
-        </div>
+        <div className="font-pixel text-[var(--neon-cyan)] animate-pulse-glow">LOADING...</div>
       </div>
     )
   }
@@ -457,14 +1128,14 @@ export default function RoomPage() {
   return (
     <div className="min-h-screen relative">
       {/* Background grid */}
-      <div 
+      <div
         className="fixed inset-0 opacity-5 pointer-events-none"
         style={{
           backgroundImage: `
             linear-gradient(rgba(0, 255, 245, 0.5) 1px, transparent 1px),
             linear-gradient(90deg, rgba(0, 255, 245, 0.5) 1px, transparent 1px)
           `,
-          backgroundSize: '50px 50px'
+          backgroundSize: '50px 50px',
         }}
       />
 
@@ -472,7 +1143,7 @@ export default function RoomPage() {
       <header className="bg-[var(--bg-secondary)] border-b-2 border-[var(--border-color)] relative z-10">
         <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-4">
-            <Link 
+            <Link
               href="/dashboard"
               className="text-[var(--text-muted)] hover:text-[var(--neon-cyan)] transition-colors"
             >
@@ -517,14 +1188,10 @@ export default function RoomPage() {
             <span className="text-[var(--neon-yellow)]">「{room.keyword}」</span>
           </div>
           {!room.youtube_video_id && (
-            <span className="text-[var(--neon-orange)] text-xs">
-              ※ YouTube URLを設定してください
-            </span>
+            <span className="text-[var(--neon-orange)] text-xs">※ YouTube URLを設定してください</span>
           )}
           {monitoringStatus && (
-            <span className="text-[var(--neon-magenta)] text-xs">
-              {monitoringStatus}
-            </span>
+            <span className="text-[var(--neon-magenta)] text-xs">{monitoringStatus}</span>
           )}
         </div>
       </div>
@@ -544,9 +1211,7 @@ export default function RoomPage() {
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <div className="font-pixel text-sm neon-text-cyan">ADD PLAYER</div>
-              <div className="text-xs text-[var(--text-muted)] mt-1">
-                空きがあれば参加者へ、満員なら待機へ自動追加
-              </div>
+              <div className="text-xs text-[var(--text-muted)] mt-1">空きがあれば参加者へ、満員なら待機へ自動追加</div>
             </div>
 
             <form onSubmit={handleAddEntry} className="flex gap-2 w-full md:max-w-md">
@@ -558,11 +1223,7 @@ export default function RoomPage() {
                 placeholder="YouTube表示名を入力"
                 disabled={adding}
               />
-              <button
-                type="submit"
-                className="arcade-btn text-xs px-4"
-                disabled={adding}
-              >
+              <button type="submit" className="arcade-btn text-xs px-4" disabled={adding}>
                 {adding ? 'ADDING...' : 'ADD'}
               </button>
             </form>
@@ -584,97 +1245,137 @@ export default function RoomPage() {
           )}
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6">
-          {/* Participants */}
-          <div className="arcade-card p-6 relative">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-pixel text-sm neon-text-green flex items-center gap-2">
-                🎮 現在の参加者
-              </h2>
-              <span className="text-[var(--text-secondary)] text-sm">
-                {participants.length}/{room.party_size}人
-              </span>
+        {dndMessage && (
+          <div
+            className={
+              dndMessage.type === 'success'
+                ? 'mb-4 bg-[var(--neon-green)]/15 border border-[var(--neon-green)] text-[var(--neon-green)] px-4 py-2 rounded text-sm'
+                : 'mb-4 bg-[var(--neon-magenta)]/15 border border-[var(--neon-magenta)] text-[var(--neon-magenta)] px-4 py-2 rounded text-sm'
+            }
+          >
+            {dndMessage.type === 'success' ? '✓ ' : '⚠ '} {dndMessage.text}
+          </div>
+        )}
+
+        <DndContext
+          sensors={sensors}
+          collisionDetection={collisionDetection}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+        >
+          <div className="grid md:grid-cols-2 gap-6">
+            {/* Participants */}
+            <div className="arcade-card p-6 relative">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="font-pixel text-sm neon-text-green flex items-center gap-2">🎮 現在の参加者</h2>
+                <span className="text-[var(--text-secondary)] text-sm">
+                  {participants.length}/{room.party_size}人
+                </span>
+              </div>
+
+              <DroppableArea
+                id={PARTY_CONTAINER_ID}
+                className={
+                  'space-y-2 mb-4 min-h-[96px] rounded ' +
+                  (isPartyEmptyDropTarget
+                    ? 'ring-2 ring-[var(--neon-cyan)]/30 bg-[var(--neon-cyan)]/5'
+                    : '')
+                }
+              >
+                <SortableContext items={partyUsernames} strategy={verticalListSortingStrategy}>
+                  {participants.length === 0 ? (
+                    <p className="text-[var(--text-muted)] text-sm text-center py-4">参加者がいません</p>
+                  ) : (
+                    participants.map((p, i) => (
+                      <SortableArcadeRow
+                        key={p.youtube_username}
+                        itemId={p.youtube_username}
+                        list="party"
+                        indexLabel={`${i + 1}.`}
+                        accentVar="cyan"
+                        name={p.display_name || p.youtube_username}
+                        showYoutubeBadge={p.source === 'youtube'}
+                        onRemove={() => handleRemoveParticipant(p.id)}
+                        indicatorEdge={
+                          dropIndicator?.list === 'party' &&
+                          dropIndicator.overId === p.youtube_username &&
+                          dropIndicator.edge !== 'empty'
+                            ? dropIndicator.edge
+                            : null
+                        }
+                      />
+                    ))
+                  )}
+                </SortableContext>
+              </DroppableArea>
+
+              {/* Decorative corners */}
+              <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[var(--neon-green)]" />
+              <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-[var(--neon-green)]" />
             </div>
 
-            <div className="space-y-2 mb-4">
-              {participants.length === 0 ? (
-                <p className="text-[var(--text-muted)] text-sm text-center py-4">
-                  参加者がいません
-                </p>
-              ) : (
-                participants.map((p, i) => (
-                  <div 
-                    key={p.id}
-                    className="flex items-center justify-between bg-[var(--bg-secondary)] p-3 rounded"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="text-[var(--neon-cyan)] font-mono text-sm">{i + 1}.</span>
-                      <span className="text-white">{p.display_name || p.youtube_username}</span>
-                      {p.source === 'youtube' && (
-                        <span className="text-xs bg-[var(--neon-magenta)]/20 text-[var(--neon-magenta)] px-1.5 py-0.5 rounded">YT</span>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => handleRemoveParticipant(p.id)}
-                      className="text-[var(--text-muted)] hover:text-red-400 transition-colors"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
+            {/* Queue */}
+            <div className="arcade-card p-6 relative">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="font-pixel text-sm neon-text-yellow flex items-center gap-2">⏳ 待機リスト</h2>
+                <span className="text-[var(--text-secondary)] text-sm">{queue.length}人</span>
+              </div>
 
-            {/* Decorative corners */}
-            <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[var(--neon-green)]" />
-            <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-[var(--neon-green)]" />
+              <DroppableArea
+                id={QUEUE_CONTAINER_ID}
+                className={
+                  'space-y-2 mb-4 min-h-[96px] rounded ' +
+                  (isQueueEmptyDropTarget
+                    ? 'ring-2 ring-[var(--neon-cyan)]/30 bg-[var(--neon-cyan)]/5'
+                    : '')
+                }
+              >
+                <SortableContext items={queueUsernames} strategy={verticalListSortingStrategy}>
+                  {queue.length === 0 ? (
+                    <p className="text-[var(--text-muted)] text-sm text-center py-4">待機者がいません</p>
+                  ) : (
+                    queue.map((q) => (
+                      <SortableArcadeRow
+                        key={q.youtube_username}
+                        itemId={q.youtube_username}
+                        list="queue"
+                        indexLabel={`${q.position + 1}.`}
+                        accentVar="yellow"
+                        name={q.display_name || q.youtube_username}
+                        showYoutubeBadge={q.source === 'youtube'}
+                        onRemove={() => handleRemoveFromQueue(q.id)}
+                        indicatorEdge={
+                          dropIndicator?.list === 'queue' &&
+                          dropIndicator.overId === q.youtube_username &&
+                          dropIndicator.edge !== 'empty'
+                            ? dropIndicator.edge
+                            : null
+                        }
+                      />
+                    ))
+                  )}
+                </SortableContext>
+              </DroppableArea>
+
+              {/* Decorative corners */}
+              <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[var(--neon-yellow)]" />
+              <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-[var(--neon-yellow)]" />
+            </div>
           </div>
 
-          {/* Queue */}
-          <div className="arcade-card p-6 relative">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-pixel text-sm neon-text-yellow flex items-center gap-2">
-                ⏳ 待機リスト
-              </h2>
-              <span className="text-[var(--text-secondary)] text-sm">
-                {queue.length}人
-              </span>
-            </div>
-
-            <div className="space-y-2 mb-4">
-              {queue.length === 0 ? (
-                <p className="text-[var(--text-muted)] text-sm text-center py-4">
-                  待機者がいません
-                </p>
-              ) : (
-                queue.map((q) => (
-                  <div 
-                    key={q.id}
-                    className="flex items-center justify-between bg-[var(--bg-secondary)] p-3 rounded"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="text-[var(--neon-yellow)] font-mono text-sm">{q.position}.</span>
-                      <span className="text-white">{q.display_name || q.youtube_username}</span>
-                      {q.source === 'youtube' && (
-                        <span className="text-xs bg-[var(--neon-magenta)]/20 text-[var(--neon-magenta)] px-1.5 py-0.5 rounded">YT</span>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => handleRemoveFromQueue(q.id)}
-                      className="text-[var(--text-muted)] hover:text-red-400 transition-colors"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {/* Decorative corners */}
-            <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[var(--neon-yellow)]" />
-            <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-[var(--neon-yellow)]" />
-          </div>
-        </div>
+          <DragOverlay>
+            {activeOverlayData ? (
+              <DragOverlayRow
+                indexLabel={activeOverlayData.indexLabel}
+                accentVar={activeOverlayData.accentVar}
+                name={activeOverlayData.name}
+                showYoutubeBadge={activeOverlayData.showYoutubeBadge}
+              />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
 
         {/* Rotate button */}
         <div className="mt-8">
@@ -691,9 +1392,7 @@ export default function RoomPage() {
           )}
 
           {queue.length === 0 && (
-            <div className="mb-3 text-[var(--text-muted)] text-xs">
-              待機リストに1人以上追加すると交代できます
-            </div>
+            <div className="mb-3 text-[var(--text-muted)] text-xs">待機リストに1人以上追加すると交代できます</div>
           )}
 
           <button
