@@ -32,6 +32,18 @@ interface QueueMember {
   source: 'manual' | 'youtube'
 }
 
+type PollResponse = {
+  isMonitoring?: boolean
+  added?: Array<{ username: string; destination?: 'participant' | 'queue' }>
+  pollingIntervalMillis?: number
+  pollingIntervalMs?: number
+  retry_after_ms?: number
+  skipped?: boolean
+  nextPageToken?: string | null
+  next_poll_at?: string | null
+  error?: string
+}
+
 export default function RoomPage() {
   const { id } = useParams()
   const { loading: authLoading } = useAuth()
@@ -53,7 +65,12 @@ export default function RoomPage() {
     text: string
   } | null>(null)
   const [rotating, setRotating] = useState(false)
-  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+  const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const pollerIdRef = useRef<string | null>(null)
+  const isMonitoringRef = useRef(false)
+  const recommendedMinRef = useRef<number>(0)
+  const errorBackoffRef = useRef<number>(0)
 
   const fetchRoomData = useCallback(async () => {
     try {
@@ -82,26 +99,105 @@ export default function RoomPage() {
     }
   }, [id])
 
+
   const pollYoutube = useCallback(async () => {
-    if (!room?.is_monitoring) return
-    
+    if (!isMonitoringRef.current) return
+
+    if (!pollerIdRef.current) {
+      try {
+        const key = 'ytqm_poller_id'
+        const existing = sessionStorage.getItem(key)
+        const generated = existing || crypto.randomUUID()
+        if (!existing) sessionStorage.setItem(key, generated)
+        pollerIdRef.current = generated
+      } catch {
+        pollerIdRef.current = crypto.randomUUID()
+      }
+    }
+
+    const pollerId = pollerIdRef.current!
+
+    const scheduleNext = (baseDelayMs: number, withJitter = true) => {
+      const recommendedMin = recommendedMinRef.current || 0
+      const delay = Math.max(recommendedMin, Math.floor(baseDelayMs))
+      const jitterMs = withJitter
+        ? Math.floor(Math.random() * Math.min(1000, Math.max(0, delay * 0.1)))
+        : 0
+
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current)
+      }
+
+      pollingRef.current = setTimeout(() => {
+        pollYoutube()
+      }, delay + jitterMs)
+    }
+
     try {
-      const res = await fetch(`/api/rooms/${id}/youtube/poll`)
-      const data = await res.json()
-      
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+
+      const res = await fetch(`/api/rooms/${id}/youtube/poll`, {
+        headers: { 'x-poller-id': pollerId },
+        signal: controller.signal,
+      })
+
+      const data: PollResponse = await res.json().catch(() => ({}))
+
+      const ytInterval =
+        typeof data?.pollingIntervalMillis === 'number'
+          ? data.pollingIntervalMillis
+          : typeof data?.pollingIntervalMs === 'number'
+            ? data.pollingIntervalMs
+            : null
+
+      if (typeof ytInterval === 'number' && ytInterval > 0) {
+        recommendedMinRef.current = ytInterval
+      }
+
+      const retryAfterMs = typeof data?.retry_after_ms === 'number' ? data.retry_after_ms : null
+
+      if (res.status === 409) {
+        scheduleNext(retryAfterMs ?? 1000)
+        return
+      }
+
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`)
+      }
+
+      errorBackoffRef.current = 0
+
       if (data.added && data.added.length > 0) {
         setLastAdded(data.added.map((a: { username: string }) => a.username))
         fetchRoomData()
         setTimeout(() => setLastAdded([]), 3000)
       }
-      
+
       if (!data.isMonitoring) {
-        setRoom(prev => prev ? { ...prev, is_monitoring: false } : null)
+        setRoom((prev) => (prev ? { ...prev, is_monitoring: false } : null))
       }
+
+      if (data?.skipped && retryAfterMs) {
+        scheduleNext(retryAfterMs, false)
+        return
+      }
+
+      scheduleNext(retryAfterMs ?? ytInterval ?? 10000)
     } catch (err) {
+      if (err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError') return
+
+      const nextBackoff = errorBackoffRef.current
+        ? Math.min(errorBackoffRef.current * 2, 60000)
+        : 2000
+
+      errorBackoffRef.current = nextBackoff
+      scheduleNext(nextBackoff)
       console.error('Poll error:', err)
     }
-  }, [id, room?.is_monitoring, fetchRoomData])
+  }, [id, fetchRoomData])
+
 
   useEffect(() => {
     if (!authLoading && id) {
@@ -109,23 +205,30 @@ export default function RoomPage() {
     }
   }, [authLoading, id, fetchRoomData])
 
+
   useEffect(() => {
+    isMonitoringRef.current = !!room?.is_monitoring
+
     if (room?.is_monitoring) {
-      pollingRef.current = setInterval(pollYoutube, 10000)
+      errorBackoffRef.current = 0
       pollYoutube()
     } else {
+      abortRef.current?.abort()
       if (pollingRef.current) {
-        clearInterval(pollingRef.current)
+        clearTimeout(pollingRef.current)
         pollingRef.current = null
       }
     }
-    
+
     return () => {
+      abortRef.current?.abort()
       if (pollingRef.current) {
-        clearInterval(pollingRef.current)
+        clearTimeout(pollingRef.current)
+        pollingRef.current = null
       }
     }
   }, [room?.is_monitoring, pollYoutube])
+
 
   const handleStartMonitoring = async () => {
     setMonitoringStatus('開始中...')

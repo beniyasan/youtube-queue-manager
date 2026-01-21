@@ -1,0 +1,2 @@
+ALTER TABLE rooms
+  ADD COLUMN IF NOT EXISTS overlay_show_queue BOOLEAN DEFAULT TRUE;

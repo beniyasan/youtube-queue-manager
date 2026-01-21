@@ -52,16 +52,13 @@ export async function getLiveChatMessages(
   }
 
   const res = await fetch(url)
+
   if (!res.ok) {
-    const errorText = await res.text()
+    const errorText = await res.text().catch(() => '')
     console.error('Failed to fetch live chat messages:', errorText)
-    return {
-      liveChatId,
-      messages: [],
-      nextPageToken: null,
-      pollingIntervalMs: 10000,
-    }
+    throw new Error(`Failed to fetch live chat messages: ${res.status}`)
   }
+
 
   const data = await res.json()
 

@@ -32,6 +32,10 @@ export async function POST(
       .update({ 
         is_monitoring: false,
         youtube_next_page_token: null,
+        youtube_next_poll_at: null,
+        youtube_poller_lease_id: null,
+        youtube_poller_lease_until: null,
+        youtube_polling_interval_ms: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)

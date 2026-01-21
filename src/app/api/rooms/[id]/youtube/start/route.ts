@@ -48,6 +48,10 @@ export async function POST(
         youtube_live_chat_id: liveChatId,
         youtube_next_page_token: null,
         last_comment_id: null,
+        youtube_next_poll_at: null,
+        youtube_poller_lease_id: null,
+        youtube_poller_lease_until: null,
+        youtube_polling_interval_ms: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)
