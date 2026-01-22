@@ -15,6 +15,7 @@ import {
   useSensors,
   type CollisionDetection,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragOverEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
@@ -138,6 +139,33 @@ function makeTempQueueMember(
   }
 }
 
+function normalizePartyAndQueueByPartySize(
+  clientOpId: string,
+  party: Participant[],
+  queue: QueueMember[],
+  partySize: number
+): { party: Participant[]; queue: QueueMember[] } {
+  const nextParty = [...party]
+  const nextQueue = [...queue]
+
+  while (nextParty.length > partySize) {
+    const demoted = nextParty.shift()
+    if (!demoted) break
+    nextQueue.push(makeTempQueueMember(clientOpId, demoted, nextQueue.length))
+  }
+
+  while (nextParty.length < partySize && nextQueue.length > 0) {
+    const promoted = nextQueue.shift()
+    if (!promoted) break
+    nextParty.push(makeTempParticipant(clientOpId, promoted))
+  }
+
+  return {
+    party: nextParty,
+    queue: normalizeQueuePositions(nextQueue),
+  }
+}
+
 function SortableArcadeRow(props: {
   itemId: string
   list: DndList
@@ -170,7 +198,7 @@ function SortableArcadeRow(props: {
       className={
         'relative flex items-center justify-between bg-[var(--bg-secondary)] p-3 rounded border border-transparent transition-colors ' +
         (isDragging
-          ? 'opacity-60'
+          ? 'opacity-0 pointer-events-none'
           : 'hover:border-[var(--border-color)] hover:shadow-[0_0_0_1px_rgba(0,255,245,0.15)]')
       }
     >
@@ -790,8 +818,27 @@ export default function RoomPage() {
       const party = [...participantsRef.current]
       const queueItems = [...queueRef.current]
 
+      const partySize = roomRef.current?.party_size ?? 0
+
       const sourceId = op.source.id
       const destOverId = op.dest.overId
+
+      const commitState = (nextParty: Participant[], nextQueue: QueueMember[]) => {
+        if (op.source.list !== op.dest.list) {
+          const normalized = normalizePartyAndQueueByPartySize(
+            clientOpId,
+            nextParty,
+            nextQueue,
+            partySize
+          )
+          setParticipants(normalized.party)
+          setQueue(normalized.queue)
+          return
+        }
+
+        setParticipants(nextParty)
+        setQueue(normalizeQueuePositions(nextQueue))
+      }
 
       if (op.mode === 'swap') {
         if (op.source.list !== 'queue' || op.dest.list !== 'party' || !destOverId) return
@@ -812,8 +859,7 @@ export default function RoomPage() {
           sourceQueueIndex
         )
 
-        setParticipants(party)
-        setQueue(normalizeQueuePositions(queueItems))
+        commitState(party, queueItems)
         return
       }
 
@@ -844,9 +890,8 @@ export default function RoomPage() {
           if (!movedParticipant) return
 
           nextParty = [...nextParty, movedParticipant]
-          setParticipants(nextParty)
-          setQueue(normalizeQueuePositions(nextQueue))
-          return
+
+          commitState(nextParty, nextQueue)
         }
 
         if (insertInto === 'queue') {
@@ -863,9 +908,8 @@ export default function RoomPage() {
           if (!movedQueueMember) return
 
           nextQueue = [...nextQueue, { ...movedQueueMember, position: nextQueue.length }]
-          setParticipants(nextParty)
-          setQueue(normalizeQueuePositions(nextQueue))
-          return
+
+          commitState(nextParty, nextQueue)
         }
 
         return
@@ -895,9 +939,8 @@ export default function RoomPage() {
 
         nextParty = [...nextParty]
         nextParty.splice(insertIndex, 0, movedParticipant)
-        setParticipants(nextParty)
-        setQueue(normalizeQueuePositions(nextQueue))
-        return
+
+        commitState(nextParty, nextQueue)
       }
 
       if (insertInto === 'queue') {
@@ -919,9 +962,8 @@ export default function RoomPage() {
 
         nextQueue = [...nextQueue]
         nextQueue.splice(insertIndex, 0, movedQueueMember)
-        setParticipants(nextParty)
-        setQueue(normalizeQueuePositions(nextQueue))
-        return
+
+        commitState(nextParty, nextQueue)
       }
     },
     []
@@ -955,6 +997,14 @@ export default function RoomPage() {
     void clearDndSuppression()
   }, [clearDndSuppression])
 
+  const handleDragMove = useCallback(
+    (event: DragMoveEvent) => {
+      dragDeltaRef.current = { x: event.delta.x, y: event.delta.y }
+      setDropIndicator(computeDropIndicator(event.over))
+    },
+    [computeDropIndicator]
+  )
+
   const handleDragOver = useCallback(
     (event: DragOverEvent) => {
       dragDeltaRef.current = { x: event.delta.x, y: event.delta.y }
@@ -981,33 +1031,10 @@ export default function RoomPage() {
         return
       }
 
-      const partySize = roomRef.current?.party_size ?? 0
-      const partyCount = participantsRef.current.length
-
-      const crossList = sourceList !== indicator.list
-      const destIsPartyEmptyDrop =
-        crossList && indicator.list === 'party' && indicator.overId === null && indicator.edge === 'empty'
-
-      if (destIsPartyEmptyDrop && partyCount >= partySize) {
-        setDndMessage({ type: 'error', text: 'パーティーが満員です。別の場所にドロップしてください。' })
-        await clearDndSuppression()
-        return
-      }
-
-      let mode: DndMode = 'insert'
-
-      if (sourceList !== indicator.list) {
-        if (indicator.list === 'party' && indicator.overId !== null) {
-          if (sourceList === 'queue' && partyCount >= partySize) {
-            mode = 'swap'
-          }
-        }
-      }
-
       const op: DndOp = {
         source: { list: sourceList, id: sourceId },
         dest: { list: indicator.list, overId: indicator.overId, edge: indicator.edge },
-        mode,
+        mode: 'insert',
       }
 
       const clientOpId = crypto.randomUUID()
@@ -1261,6 +1288,7 @@ export default function RoomPage() {
           sensors={sensors}
           collisionDetection={collisionDetection}
           onDragStart={handleDragStart}
+          onDragMove={handleDragMove}
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
           onDragCancel={handleDragCancel}

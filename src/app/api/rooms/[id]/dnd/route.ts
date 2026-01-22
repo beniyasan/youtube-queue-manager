@@ -63,6 +63,22 @@ function sha256Hex(input: string): string {
   return createHash('sha256').update(input).digest('hex')
 }
 
+function normalizePartyAndQueue(
+  partyUsernames: string[],
+  queueUsernames: string[],
+  partySize: number
+): void {
+  while (partyUsernames.length > partySize) {
+    const demoted = partyUsernames.shift()
+    if (demoted) queueUsernames.push(demoted)
+  }
+
+  while (partyUsernames.length < partySize && queueUsernames.length > 0) {
+    const promoted = queueUsernames.shift()
+    if (promoted) partyUsernames.push(promoted)
+  }
+}
+
 function applyDnd(input: ApplyDndInput): ApplyDndOutput {
   const partyUsernames = [...input.partyUsernames]
   const queueUsernames = [...input.queueUsernames]
@@ -133,11 +149,11 @@ function applyDnd(input: ApplyDndInput): ApplyDndOutput {
     }
 
     if (op.dest.list === 'party') {
-      if (partyUsernames.length >= partySize) {
-        throw new Error('Party is full')
-      }
-
       partyUsernames.push(sourceId)
+
+      if (op.source.list !== op.dest.list) {
+        normalizePartyAndQueue(partyUsernames, queueUsernames, partySize)
+      }
 
       return {
         desiredPartyUsernames: partyUsernames,
@@ -147,6 +163,10 @@ function applyDnd(input: ApplyDndInput): ApplyDndOutput {
 
     if (op.dest.list === 'queue') {
       queueUsernames.push(sourceId)
+
+      if (op.source.list !== op.dest.list) {
+        normalizePartyAndQueue(partyUsernames, queueUsernames, partySize)
+      }
 
       return {
         desiredPartyUsernames: partyUsernames,
@@ -175,8 +195,8 @@ function applyDnd(input: ApplyDndInput): ApplyDndOutput {
   const insertIndex = op.dest.edge === 'before' ? overIndex : overIndex + 1
   destArray.splice(insertIndex, 0, sourceId)
 
-  if (op.dest.list === 'party' && partyUsernames.length > partySize) {
-    throw new Error('Party is full')
+  if (op.source.list !== op.dest.list) {
+    normalizePartyAndQueue(partyUsernames, queueUsernames, partySize)
   }
 
   return {
@@ -328,14 +348,6 @@ export async function POST(
         return NextResponse.json({ error: 'Invalid op.dest.overId' }, { status: 400 })
       }
     }
-
-    if (normalizedOp.mode === 'insert' && normalizedOp.dest.list === 'party') {
-      const insertsNewPartyMember = normalizedOp.source.list === 'queue'
-      if (insertsNewPartyMember && partyUsernames.length >= room.party_size) {
-        return NextResponse.json({ error: 'Party is full' }, { status: 400 })
-      }
-    }
-
 
     let desiredPartyUsernames: string[]
     let desiredQueueUsernames: string[]
