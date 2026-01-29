@@ -26,6 +26,19 @@ export async function GET(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
+    const { data: nextLastReservations, error: nextLastError } = await supabase
+      .from('room_next_last')
+      .select('youtube_username')
+      .eq('room_id', id)
+
+    if (nextLastError) {
+      return NextResponse.json({ error: nextLastError.message }, { status: 500 })
+    }
+
+    const nextLastUsernames = new Set(
+      (nextLastReservations || []).map((reservation) => reservation.youtube_username)
+    )
+
     const { data: participants, error } = await supabase
       .from('participants')
       .select('*')
@@ -37,7 +50,12 @@ export async function GET(
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    return NextResponse.json({ participants })
+    const participantsWithFlags = (participants || []).map((participant) => ({
+      ...participant,
+      is_next_last: nextLastUsernames.has(participant.youtube_username),
+    }))
+
+    return NextResponse.json({ participants: participantsWithFlags })
   } catch {
     return NextResponse.json({ error: 'サーバーエラーが発生しました' }, { status: 500 })
   }

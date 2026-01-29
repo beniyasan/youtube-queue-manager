@@ -40,6 +40,7 @@ interface Participant {
   display_name: string | null
   joined_at: string
   source: 'manual' | 'youtube'
+  is_next_last: boolean
 }
 
 interface QueueMember {
@@ -48,11 +49,14 @@ interface QueueMember {
   display_name: string | null
   position: number
   source: 'manual' | 'youtube'
+  is_next_last: boolean
 }
 
 type PollResponse = {
   isMonitoring?: boolean
   added?: Array<{ username: string; destination?: 'participant' | 'queue' }>
+  next_last_updated?: boolean
+  next_last_usernames?: string[]
   pollingIntervalMillis?: number
   pollingIntervalMs?: number
   retry_after_ms?: number
@@ -122,6 +126,7 @@ function makeTempParticipant(clientOpId: string, source: QueueMember): Participa
     display_name: source.display_name,
     joined_at: new Date().toISOString(),
     source: source.source,
+    is_next_last: source.is_next_last,
   }
 }
 
@@ -136,6 +141,7 @@ function makeTempQueueMember(
     display_name: source.display_name,
     position,
     source: source.source,
+    is_next_last: source.is_next_last,
   }
 }
 
@@ -173,6 +179,7 @@ function SortableArcadeRow(props: {
   accentVar: 'cyan' | 'yellow'
   name: string
   showYoutubeBadge?: boolean
+  showNextLastBadge?: boolean
   onRemove?: () => void
   indicatorEdge?: Exclude<DndEdge, 'empty'> | null
 }) {
@@ -229,6 +236,12 @@ function SortableArcadeRow(props: {
         {props.showYoutubeBadge && (
           <span className="text-xs bg-[var(--neon-magenta)]/20 text-[var(--neon-magenta)] px-1.5 py-0.5 rounded">
             YT
+          </span>
+        )}
+
+        {props.showNextLastBadge && (
+          <span className="text-xs bg-[var(--neon-orange)]/20 text-[var(--neon-orange)] px-1.5 py-0.5 rounded">
+            次ラスト
           </span>
         )}
       </div>
@@ -448,16 +461,24 @@ export default function RoomPage() {
 
       errorBackoffRef.current = 0
 
+      let needsRoomSync = false
+
       if (data.added && data.added.length > 0) {
         setLastAdded(data.added.map((a: { username: string }) => a.username))
+        needsRoomSync = true
+        setTimeout(() => setLastAdded([]), 3000)
+      }
 
+      if (data.next_last_updated) {
+        needsRoomSync = true
+      }
+
+      if (needsRoomSync) {
         if (!suppressExternalUpdatesRef.current) {
           fetchRoomData()
         } else {
           pendingExternalSyncRef.current = true
         }
-
-        setTimeout(() => setLastAdded([]), 3000)
       }
 
       if (!data.isMonitoring) {
@@ -656,40 +677,17 @@ export default function RoomPage() {
   const handleRotate = async () => {
     if (rotating) return
 
-    if (queue.length === 0) {
-      setRotateMessage({ type: 'error', text: '待機者がいないため交代できません' })
+    const isMonitoring = !!room?.is_monitoring
+    const hasAnyNextLast =
+      participants.some((p) => p.is_next_last) || queue.some((q) => q.is_next_last)
+
+    const canRotate = isMonitoring ? queue.length > 0 || hasAnyNextLast : queue.length > 0
+
+    if (!canRotate) {
+      setRotateMessage({ type: 'error', text: '交代できる対象がありません' })
       setTimeout(() => setRotateMessage(null), 2500)
       return
     }
-
-    // Optimistic UI update for rotate
-    const rotateCount = Math.min(room?.rotate_count || 1, queue.length)
-    const participantsToRotate = participants.slice(0, rotateCount)
-    const queueToMove = queue.slice(0, rotateCount)
-
-    setParticipants((prev) => {
-      const remaining = prev.slice(rotateCount)
-      const newEntries = queueToMove.map((q) => ({
-        id: `temp-${Date.now()}-${Math.random()}`,
-        youtube_username: q.youtube_username,
-        display_name: q.display_name,
-        joined_at: new Date().toISOString(),
-        source: q.source,
-      }))
-      return [...remaining, ...newEntries]
-    })
-
-    setQueue((prev) => {
-      const remaining = normalizeQueuePositions(prev.slice(rotateCount))
-      const rotatedMembers = participantsToRotate.map((p, index) => ({
-        id: `temp-queue-${Date.now()}-${Math.random()}`,
-        youtube_username: p.youtube_username,
-        display_name: p.display_name,
-        position: remaining.length + index,
-        source: p.source,
-      }))
-      return normalizeQueuePositions([...remaining, ...rotatedMembers])
-    })
 
     setRotating(true)
     try {
@@ -701,17 +699,42 @@ export default function RoomPage() {
 
       if (!res.ok) {
         setRotateMessage({ type: 'error', text: data.error || '交代に失敗しました' })
-        // Revert on failure
         fetchRoomData()
         return
       }
 
-      setRotateMessage({ type: 'success', text: data.message || '交代しました' })
-      // No sync - fully optimistic (only revert on error)
+      if (data?.room) {
+        setRoom((prev) => (prev ? { ...prev, ...data.room } : prev))
+      }
+      if (Array.isArray(data?.participants)) {
+        setParticipants(data.participants)
+      }
+      if (Array.isArray(data?.queue)) {
+        setQueue(data.queue)
+      }
+
+      const removedParty = Array.isArray(data?.removed_next_last_party)
+        ? data.removed_next_last_party.length
+        : 0
+      const removedQueue = Array.isArray(data?.removed_next_last_queue)
+        ? data.removed_next_last_queue.length
+        : 0
+      const shortage = typeof data?.party_shortage === 'number' ? data.party_shortage : 0
+
+      let message = typeof data?.message === 'string' ? data.message : '交代しました'
+      if (shortage > 0 && !message.includes('不足')) {
+        message += `（不足 ${shortage}人）`
+      }
+
+      if (!data?.message && (removedParty > 0 || removedQueue > 0)) {
+        message = `次ラスト削除:参加${removedParty}人/待機${removedQueue}人` +
+          (shortage > 0 ? `（不足 ${shortage}人）` : '')
+      }
+
+      setRotateMessage({ type: 'success', text: message })
     } catch (err) {
       console.error('Failed to rotate:', err)
       setRotateMessage({ type: 'error', text: '通信エラーで交代できませんでした' })
-      // Revert on error
       fetchRoomData()
     } finally {
       setRotating(false)
@@ -742,6 +765,9 @@ export default function RoomPage() {
     [participants]
   )
   const queueUsernames = useMemo(() => queue.map((q) => q.youtube_username), [queue])
+
+  const hasAnyNextLast = participants.some((p) => p.is_next_last) || queue.some((q) => q.is_next_last)
+  const canRotate = room?.is_monitoring ? queue.length > 0 || hasAnyNextLast : queue.length > 0
 
 
   const postDnd = useCallback(
@@ -1325,6 +1351,7 @@ export default function RoomPage() {
                         accentVar="cyan"
                         name={p.display_name || p.youtube_username}
                         showYoutubeBadge={p.source === 'youtube'}
+                        showNextLastBadge={room.is_monitoring && p.is_next_last}
                         onRemove={() => handleRemoveParticipant(p.id)}
                         indicatorEdge={
                           dropIndicator?.list === 'party' &&
@@ -1373,6 +1400,7 @@ export default function RoomPage() {
                         accentVar="yellow"
                         name={q.display_name || q.youtube_username}
                         showYoutubeBadge={q.source === 'youtube'}
+                        showNextLastBadge={room.is_monitoring && q.is_next_last}
                         onRemove={() => handleRemoveFromQueue(q.id)}
                         indicatorEdge={
                           dropIndicator?.list === 'queue' &&
@@ -1419,20 +1447,22 @@ export default function RoomPage() {
             </div>
           )}
 
-          {queue.length === 0 && (
+          {!canRotate && (
             <div className="mb-3 text-[var(--text-muted)] text-xs">待機リストに1人以上追加すると交代できます</div>
           )}
 
           <button
             onClick={handleRotate}
             className="arcade-btn w-full py-4 text-base"
-            disabled={queue.length === 0 || rotating}
+            disabled={!canRotate || rotating}
           >
             {rotating
               ? 'ROTATING...'
-              : queue.length === 0
+              : !canRotate
                 ? '交代メンバーがいません'
-                : `🔄 交代する（${Math.min(room.rotate_count, queue.length)}人入れ替え）`}
+                : room?.is_monitoring
+                  ? '🔄 交代する（次ラスト）'
+                  : `🔄 交代する（${Math.min(room?.rotate_count ?? 1, queue.length)}人入れ替え）`}
           </button>
         </div>
       </main>

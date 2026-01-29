@@ -38,7 +38,7 @@ export async function GET(
     // Validate ownership + current state
     const { data: room } = await supabase
       .from('rooms')
-      .select('id,user_id,is_monitoring,youtube_video_id,youtube_live_chat_id,youtube_next_page_token,last_comment_id,keyword,party_size,youtube_next_poll_at,youtube_poller_lease_id,youtube_poller_lease_until,youtube_polling_interval_ms')
+      .select('id,user_id,is_monitoring,youtube_video_id,youtube_live_chat_id,youtube_next_page_token,last_comment_id,keyword,next_last_keyword,party_size,youtube_next_poll_at,youtube_poller_lease_id,youtube_poller_lease_until,youtube_polling_interval_ms')
       .eq('id', id)
       .eq('user_id', user.id)
       .single()
@@ -51,6 +51,8 @@ export async function GET(
       return NextResponse.json({
         message: '監視が停止しています',
         added: [],
+        next_last_usernames: [],
+        next_last_updated: false,
         isMonitoring: false,
         retry_after_ms: null,
       })
@@ -84,7 +86,7 @@ export async function GET(
           `youtube_poller_lease_id.eq.${pollerId}`,
         ].join(',')
       )
-      .select('youtube_next_poll_at,youtube_poller_lease_id,youtube_poller_lease_until,youtube_next_page_token,youtube_live_chat_id,last_comment_id,youtube_polling_interval_ms,keyword,party_size,youtube_video_id,is_monitoring')
+      .select('youtube_next_poll_at,youtube_poller_lease_id,youtube_poller_lease_until,youtube_next_page_token,youtube_live_chat_id,last_comment_id,youtube_polling_interval_ms,keyword,next_last_keyword,party_size,youtube_video_id,is_monitoring')
 
     if (leaseError) {
       return NextResponse.json({ error: leaseError.message }, { status: 500 })
@@ -112,6 +114,8 @@ export async function GET(
           next_poll_at: current?.youtube_next_poll_at ?? null,
           pollingIntervalMillis: current?.youtube_polling_interval_ms ?? null,
           pollingIntervalMs: current?.youtube_polling_interval_ms ?? null,
+          next_last_usernames: [],
+          next_last_updated: false,
         },
         { status: 409 }
       )
@@ -127,6 +131,8 @@ export async function GET(
         message: 'ポーリングをスキップしました',
         skipped: true,
         added: [],
+        next_last_usernames: [],
+        next_last_updated: false,
         totalMessages: 0,
         newMessages: 0,
         isMonitoring: true,
@@ -143,7 +149,7 @@ export async function GET(
       : await getLiveChatId(leasedRoom.youtube_video_id)
 
     if (!liveChatId) {
-      await supabase
+      const { error: stopError } = await supabase
         .from('rooms')
         .update({
           is_monitoring: false,
@@ -158,9 +164,24 @@ export async function GET(
         .eq('id', id)
         .eq('user_id', user.id)
 
+      if (stopError) {
+        return NextResponse.json({ error: stopError.message }, { status: 500 })
+      }
+
+      const { error: clearNextLastError } = await supabase
+        .from('room_next_last')
+        .delete()
+        .eq('room_id', id)
+
+      if (clearNextLastError) {
+        return NextResponse.json({ error: clearNextLastError.message }, { status: 500 })
+      }
+
       return NextResponse.json({
         message: 'ライブチャットが終了しました',
         added: [],
+        next_last_usernames: [],
+        next_last_updated: false,
         isMonitoring: false,
         retry_after_ms: null,
       })
@@ -175,6 +196,15 @@ export async function GET(
     const nextPollAtIso = toIso(new Date(nowMs + ytInterval))
 
     const newMessages = filterMessagesByKeyword(messages, leasedRoom.keyword)
+
+    const nextLastKeyword =
+      typeof leasedRoom.next_last_keyword === 'string' && leasedRoom.next_last_keyword.trim()
+        ? leasedRoom.next_last_keyword.trim()
+        : null
+
+    const nextLastMessages = nextLastKeyword
+      ? filterMessagesByKeyword(messages, nextLastKeyword)
+      : []
 
     const { count: participantCount } = await supabase
       .from('participants')
@@ -191,10 +221,43 @@ export async function GET(
       .select('youtube_username')
       .eq('room_id', id)
 
-    const existingUsernames = new Set([
+    const membershipUsernames = new Set([
       ...(existingParticipants || []).map((p) => p.youtube_username),
       ...(existingQueue || []).map((q) => q.youtube_username),
     ])
+
+    const nextLastUsernamesToUpsert = Array.from(
+      new Set(
+        nextLastMessages
+          .map((msg) => msg.authorDisplayName)
+          .filter((username) => membershipUsernames.has(username))
+      )
+    )
+
+    let nextLastUsernames: string[] = []
+    let nextLastUpdated = false
+
+    if (nextLastUsernamesToUpsert.length > 0) {
+      const { error: nextLastError } = await supabase
+        .from('room_next_last')
+        .upsert(
+          nextLastUsernamesToUpsert.map((youtube_username) => ({
+            room_id: id,
+            youtube_username,
+            reserved_at: nowIso,
+          })),
+          { onConflict: 'room_id,youtube_username' }
+        )
+
+      if (nextLastError) {
+        return NextResponse.json({ error: nextLastError.message }, { status: 500 })
+      }
+
+      nextLastUsernames = nextLastUsernamesToUpsert
+      nextLastUpdated = true
+    }
+
+    const existingUsernames = new Set(membershipUsernames)
 
     const added: { username: string; destination: 'participant' | 'queue' }[] = []
     let currentParticipantCount = participantCount || 0
@@ -276,6 +339,8 @@ export async function GET(
     return NextResponse.json({
       message: 'ポーリング完了',
       added,
+      next_last_usernames: nextLastUsernames,
+      next_last_updated: nextLastUpdated,
       totalMessages: messages.length,
       newMessages: newMessages.length,
       isMonitoring: true,

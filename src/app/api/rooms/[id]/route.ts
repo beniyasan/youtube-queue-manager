@@ -46,7 +46,21 @@ export async function PUT(
     }
 
     const body = await request.json()
-    const { name, youtube_url, keyword, party_size, rotate_count } = body
+    const { name, youtube_url, keyword, party_size, rotate_count, next_last_keyword } = body
+
+    let trimmedNextLastKeyword: string | undefined
+    if (typeof next_last_keyword !== 'undefined') {
+      if (typeof next_last_keyword !== 'string') {
+        return NextResponse.json({ error: '次ラストキーワードは必須です' }, { status: 400 })
+      }
+
+      const trimmed = next_last_keyword.trim()
+      if (!trimmed) {
+        return NextResponse.json({ error: '次ラストキーワードは必須です' }, { status: 400 })
+      }
+
+      trimmedNextLastKeyword = trimmed
+    }
 
     const youtube_video_id = youtube_url ? extractVideoId(youtube_url) : null
 
@@ -59,6 +73,9 @@ export async function PUT(
         keyword,
         party_size,
         rotate_count,
+        ...(trimmedNextLastKeyword !== undefined
+          ? { next_last_keyword: trimmedNextLastKeyword }
+          : {}),
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)

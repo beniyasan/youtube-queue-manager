@@ -8,8 +8,10 @@ export async function POST(
   try {
     const { id } = await params
     const supabase = await createClient()
-    
-    const { data: { user } } = await supabase.auth.getUser()
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
     if (!user) {
       return NextResponse.json({ error: '認証が必要です' }, { status: 401 })
     }
@@ -26,35 +28,13 @@ export async function POST(
       return NextResponse.json({ error: 'ルームが見つかりません' }, { status: 404 })
     }
 
-    // Update room
-    const { error } = await supabase
-      .from('rooms')
-      .update({ 
-        is_monitoring: false,
-        youtube_next_page_token: null,
-        youtube_next_poll_at: null,
-        youtube_poller_lease_id: null,
-        youtube_poller_lease_until: null,
-        youtube_polling_interval_ms: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .eq('user_id', user.id)
+    const { error } = await supabase.from('room_next_last').delete().eq('room_id', id)
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    const { error: clearNextLastError } = await supabase
-      .from('room_next_last')
-      .delete()
-      .eq('room_id', id)
-
-    if (clearNextLastError) {
-      return NextResponse.json({ error: clearNextLastError.message }, { status: 500 })
-    }
-
-    return NextResponse.json({ message: 'YouTube監視を停止しました' })
+    return NextResponse.json({ message: '次ラスト予約を全解除しました' })
   } catch {
     return NextResponse.json({ error: 'サーバーエラーが発生しました' }, { status: 500 })
   }

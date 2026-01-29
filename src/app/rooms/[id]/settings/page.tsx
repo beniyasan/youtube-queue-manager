@@ -9,6 +9,7 @@ interface Room {
   name: string
   youtube_url: string | null
   keyword: string
+  next_last_keyword: string
   party_size: number
   rotate_count: number
 }
@@ -16,16 +17,18 @@ interface Room {
 export default function RoomSettingsPage() {
   const { id } = useParams()
   const router = useRouter()
-  
+
   const [room, setRoom] = useState<Room | null>(null)
   const [name, setName] = useState('')
   const [youtubeUrl, setYoutubeUrl] = useState('')
   const [keyword, setKeyword] = useState('')
+  const [nextLastKeyword, setNextLastKeyword] = useState('')
   const [partySize, setPartySize] = useState(4)
   const [rotateCount, setRotateCount] = useState(1)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [clearingNextLast, setClearingNextLast] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
@@ -39,6 +42,7 @@ export default function RoomSettingsPage() {
           setName(data.room.name)
           setYoutubeUrl(data.room.youtube_url || '')
           setKeyword(data.room.keyword)
+          setNextLastKeyword(data.room.next_last_keyword || '')
           setPartySize(data.room.party_size)
           setRotateCount(data.room.rotate_count)
         }
@@ -66,6 +70,7 @@ export default function RoomSettingsPage() {
           name,
           youtube_url: youtubeUrl,
           keyword,
+          next_last_keyword: nextLastKeyword,
           party_size: partySize,
           rotate_count: rotateCount,
         }),
@@ -82,6 +87,31 @@ export default function RoomSettingsPage() {
       setError('保存に失敗しました')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleClearNextLastReservations = async () => {
+    setError('')
+    setSuccess('')
+    setClearingNextLast(true)
+
+    try {
+      const res = await fetch(`/api/rooms/${id}/next-last/clear`, { method: 'POST' })
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string
+        message?: string
+      }
+
+      if (!res.ok) {
+        setError(data.error || '次ラスト予約の全解除に失敗しました')
+        return
+      }
+
+      setSuccess(data.message || '次ラスト予約を全解除しました')
+    } catch {
+      setError('次ラスト予約の全解除に失敗しました')
+    } finally {
+      setClearingNextLast(false)
     }
   }
 
@@ -129,21 +159,21 @@ export default function RoomSettingsPage() {
   return (
     <div className="min-h-screen relative">
       {/* Background grid */}
-      <div 
+      <div
         className="fixed inset-0 opacity-5 pointer-events-none"
         style={{
           backgroundImage: `
             linear-gradient(rgba(0, 255, 245, 0.5) 1px, transparent 1px),
             linear-gradient(90deg, rgba(0, 255, 245, 0.5) 1px, transparent 1px)
           `,
-          backgroundSize: '50px 50px'
+          backgroundSize: '50px 50px',
         }}
       />
 
       {/* Header */}
       <header className="bg-[var(--bg-secondary)] border-b-2 border-[var(--border-color)] relative z-10">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center gap-4">
-          <Link 
+          <Link
             href={`/rooms/${id}`}
             className="text-[var(--text-muted)] hover:text-[var(--neon-cyan)] transition-colors"
           >
@@ -157,7 +187,7 @@ export default function RoomSettingsPage() {
       <main className="max-w-2xl mx-auto px-4 py-8 relative z-10">
         <div className="arcade-card p-8 relative">
           <h2 className="font-pixel text-lg text-white mb-6">ROOM SETTINGS</h2>
-          
+
           <form onSubmit={handleSubmit} className="space-y-6">
             {error && (
               <div className="bg-red-900/30 border border-red-500 text-red-400 p-3 rounded text-sm">
@@ -211,6 +241,20 @@ export default function RoomSettingsPage() {
               />
             </div>
 
+            {/* Next Last Keyword */}
+            <div>
+              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
+                次ラストキーワード <span className="text-[var(--neon-magenta)]">*</span>
+              </label>
+              <input
+                type="text"
+                value={nextLastKeyword}
+                onChange={(e) => setNextLastKeyword(e.target.value)}
+                className="arcade-input"
+                required
+              />
+            </div>
+
             {/* Party Size & Rotate Count */}
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -253,13 +297,24 @@ export default function RoomSettingsPage() {
           {/* Danger zone */}
           <div className="mt-12 pt-8 border-t border-[var(--border-color)]">
             <h3 className="font-pixel text-sm text-red-400 mb-4">DANGER ZONE</h3>
-            <button
-              onClick={handleDelete}
-              disabled={deleting}
-              className="bg-red-900/30 border-2 border-red-500 text-red-400 px-4 py-2 rounded hover:bg-red-900/50 transition-colors disabled:opacity-50"
-            >
-              {deleting ? 'DELETING...' : 'DELETE ROOM'}
-            </button>
+
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={handleClearNextLastReservations}
+                disabled={saving || deleting || clearingNextLast}
+                className="bg-[var(--bg-secondary)] border-2 border-[var(--neon-magenta)] text-[var(--neon-magenta)] px-4 py-2 rounded hover:bg-[var(--bg-secondary)]/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                次ラスト予約を全解除
+              </button>
+
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="bg-red-900/30 border-2 border-red-500 text-red-400 px-4 py-2 rounded hover:bg-red-900/50 transition-colors disabled:opacity-50"
+              >
+                {deleting ? 'DELETING...' : 'DELETE ROOM'}
+              </button>
+            </div>
           </div>
 
           {/* Decorative corners */}
