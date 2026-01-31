@@ -1,44 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
-async function renormalizeQueuePositions(supabase: Awaited<ReturnType<typeof createClient>>, roomId: string) {
-  const { data: queueRows, error: queueError } = await supabase
-    .from('waiting_queue')
-    .select('id, position')
-    .eq('room_id', roomId)
-    .order('position', { ascending: true })
-
-  if (queueError) {
-    return { error: queueError }
-  }
-
-  const offset = 1_000_000
-  for (const row of queueRows ?? []) {
-    const { error } = await supabase
-      .from('waiting_queue')
-      .update({ position: row.position + offset })
-      .eq('id', row.id)
-
-    if (error) {
-      return { error }
-    }
-  }
-
-  for (let i = 0; i < (queueRows ?? []).length; i++) {
-    const row = queueRows[i]
-    const { error } = await supabase
-      .from('waiting_queue')
-      .update({ position: i })
-      .eq('id', row.id)
-
-    if (error) {
-      return { error }
-    }
-  }
-
-  return { error: null }
-}
-
 function uniqStrings(values: string[]) {
   return Array.from(new Set(values))
 }
@@ -352,7 +314,9 @@ export async function POST(
       return NextResponse.json({ error: '交代できる対象がありません' }, { status: 400 })
     }
 
-    const { error: normalizeError } = await renormalizeQueuePositions(supabase, id)
+    const { error: normalizeError } = await supabase.rpc('renormalize_queue_positions', {
+      p_room_id: id,
+    })
     if (normalizeError) {
       return NextResponse.json({ error: normalizeError.message }, { status: 500 })
     }

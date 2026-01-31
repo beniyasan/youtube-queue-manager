@@ -689,6 +689,33 @@ export default function RoomPage() {
       return
     }
 
+    // Optimistic update: calculate expected state immediately (monitoring OFF case)
+    const rotateCount = Math.min(room?.rotate_count || 1, queue.length)
+    const participantsToRotate = participants.slice(0, rotateCount)
+    const queueToMove = queue.slice(0, rotateCount)
+
+    const optimisticParticipants = [
+      ...participants.slice(rotateCount),
+      ...queueToMove.map((q) => ({
+        ...q,
+        id: `temp-${Date.now()}-${q.youtube_username}`,
+        joined_at: new Date().toISOString(),
+      })),
+    ]
+
+    const optimisticQueue = normalizeQueuePositions([
+      ...queue.slice(rotateCount),
+      ...participantsToRotate.map((p, i) => ({
+        ...p,
+        id: `temp-queue-${Date.now()}-${p.youtube_username}`,
+        position: queue.length - rotateCount + i,
+      })),
+    ])
+
+    // Apply optimistic update immediately for instant feedback
+    setParticipants(optimisticParticipants)
+    setQueue(optimisticQueue)
+
     setRotating(true)
     try {
       const res = await fetch(`/api/rooms/${id}/rotate`, {
@@ -699,18 +726,29 @@ export default function RoomPage() {
 
       if (!res.ok) {
         setRotateMessage({ type: 'error', text: data.error || '交代に失敗しました' })
+        // Revert to server state on error
         fetchRoomData()
         return
       }
 
+      // Success: sync with server state (avoid visual flash if matches optimistic)
       if (data?.room) {
         setRoom((prev) => (prev ? { ...prev, ...data.room } : prev))
       }
       if (Array.isArray(data?.participants)) {
-        setParticipants(data.participants)
+        // Only update if different from optimistic (to avoid flash)
+        const serverUsernames = data.participants.map((p: Participant) => p.youtube_username).join(',')
+        const optimisticUsernames = optimisticParticipants.map((p) => p.youtube_username).join(',')
+        if (serverUsernames !== optimisticUsernames) {
+          setParticipants(data.participants)
+        }
       }
       if (Array.isArray(data?.queue)) {
-        setQueue(data.queue)
+        const serverQueueUsernames = data.queue.map((q: QueueMember) => q.youtube_username).join(',')
+        const optimisticQueueUsernames = optimisticQueue.map((q) => q.youtube_username).join(',')
+        if (serverQueueUsernames !== optimisticQueueUsernames) {
+          setQueue(data.queue)
+        }
       }
 
       const removedParty = Array.isArray(data?.removed_next_last_party)
@@ -735,6 +773,7 @@ export default function RoomPage() {
     } catch (err) {
       console.error('Failed to rotate:', err)
       setRotateMessage({ type: 'error', text: '通信エラーで交代できませんでした' })
+      // Revert on error
       fetchRoomData()
     } finally {
       setRotating(false)
